@@ -19,22 +19,31 @@ machine:
 
 For an environment-based setup, provide `API_HOST`, `MACHINE_ID`, and `MACHINE_TOKEN` to the container.
 
-## Update / logs / stop
+## Update an existing Compose node
+
+Upgrade Xboard and verify its `node_traffic_reports` migration first. Then, in the node's existing Compose directory, set the following in the Compose project's `.env` file. If `compose.yml` has a hard-coded `image:` instead, update that line to the same image. Keep the existing `config/config.yml` and mounts.
+
+```dotenv
+XBOARD_NODE_IMAGE=ghcr.io/furina-lee/xboard-node:v1.13-furina.3
+```
 
 ```bash
-docker compose pull && docker compose up -d
-docker compose logs -f
-docker compose down
+docker compose config --images
+docker compose pull xboard-node &&
+docker compose up -d xboard-node
+docker compose exec xboard-node xboard-node -v
+docker compose logs --tail=100 xboard-node
 ```
+
+If you use additional Compose files, pass the same `-f` arguments used for this deployment.
 
 ## Layout
 
 | Path | Purpose |
 |------|---------|
 | `compose.yml` | Service definition |
-| `config/config.yml.example` | Template (safe to commit) |
-| `config/config.yml` | Your secrets (**do not commit**; add to `.gitignore` upstream) |
-| `.env.example` | Optional env overrides |
+| `config/config.yml` | Bundled config template. Keep local token edits out of Git. |
+| `.env` | Optional local image override |
 
 ## Host network
 
@@ -42,4 +51,4 @@ docker compose down
 
 ## Image
 
-Default: `ghcr.io/furina-lee/xboard-node:v1.13-furina.2`. Set `XBOARD_NODE_IMAGE` in the Compose project environment to use a different image or tag.
+Default: `ghcr.io/furina-lee/xboard-node:v1.13-furina.3`. Set `XBOARD_NODE_IMAGE` in the Compose project environment to use a different image or tag.
