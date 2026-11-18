@@ -37,13 +37,34 @@ docker compose up -d
 
 ```bash
 # Node mode
-curl -fsSL https://raw.githubusercontent.com/Furina-Lee/Xboard-Node/v1.13-furina.2/install.sh | \
-  sudo bash -s -- --mode node --panel https://panel.example.com --token TOKEN --node-id 1 --version v1.13-furina.2
+curl -fsSL https://raw.githubusercontent.com/Furina-Lee/Xboard-Node/v1.13-furina.3/install.sh | \
+  sudo bash -s -- --mode node --panel https://panel.example.com --token TOKEN --node-id 1 --version v1.13-furina.3
 
 # Machine mode
-curl -fsSL https://raw.githubusercontent.com/Furina-Lee/Xboard-Node/v1.13-furina.2/install.sh | \
-  sudo bash -s -- --mode machine --panel https://panel.example.com --token TOKEN --machine-id 1 --version v1.13-furina.2
+curl -fsSL https://raw.githubusercontent.com/Furina-Lee/Xboard-Node/v1.13-furina.3/install.sh | \
+  sudo bash -s -- --mode machine --panel https://panel.example.com --token TOKEN --machine-id 1 --version v1.13-furina.3
 ```
+
+### Update an existing node
+
+For the traffic quota fix, update Xboard first and verify that the panel migration `node_traffic_reports` has run. Then upgrade the node. [Panel upgrade instructions](https://github.com/Furina-Lee/Xboard#升级到流量配额修复版)
+
+**Linux systemd**
+
+Run this on each node host. The fork's installer downloads the matching AMD64 or ARM64 binaries, backs up the existing installation, and restarts the service using the existing node configuration.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Furina-Lee/Xboard-Node/v1.13-furina.3/install.sh -o xboard-node-install.sh &&
+sudo bash xboard-node-install.sh upgrade --version v1.13-furina.3
+sudo xbctl version
+sudo systemctl is-active xboard-node
+```
+
+If your installed `xbctl` already uses the Furina-Lee release repository, you can also run `sudo xbctl upgrade --version v1.13-furina.3`.
+
+**Docker**
+
+Use `ghcr.io/furina-lee/xboard-node:v1.13-furina.3` and recreate the node container with its existing configuration and mounts. For Compose, follow the [Compose update commands](https://github.com/Furina-Lee/Xboard-Node/tree/compose#update-an-existing-compose-node).
 
 ## xbctl
 
