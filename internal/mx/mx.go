@@ -71,8 +71,14 @@ func Run(ctx context.Context, cfg *config.Config, client *panel.Client) error {
 		if _, certErr := os.Stat(cfg.Cert.CertFile); certErr == nil {
 			if _, keyErr := os.Stat(cfg.Cert.KeyFile); keyErr == nil {
 				cert["mode"] = "file"
-				cert["cert_file"] = cfg.Cert.CertFile
-				cert["key_file"] = cfg.Cert.KeyFile
+				cert["cert_file"], err = filepath.Abs(cfg.Cert.CertFile)
+				if err != nil {
+					return err
+				}
+				cert["key_file"], err = filepath.Abs(cfg.Cert.KeyFile)
+				if err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -102,6 +108,8 @@ func Run(ctx context.Context, cfg *config.Config, client *panel.Client) error {
 	for ctx.Err() == nil {
 		cmd := exec.CommandContext(ctx, binary, "-c", file.Name())
 		cmd.Dir = dir
+		// Keep machine and panel credentials out of the worker environment.
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "TZ=" + os.Getenv("TZ")}
 		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 		cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 		cmd.WaitDelay = 8 * time.Second
