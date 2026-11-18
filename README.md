@@ -1,6 +1,6 @@
 # xboard-node
 
-Node backend for [Xboard](https://github.com/cedar2025/Xboard). Supports `sing-box` / `xray-core` dual kernels.
+Node backend for [Xboard](https://github.com/Furina-Lee/Xboard). Supports `sing-box` / `xray-core` dual kernels.
 
 > **Disclaimer**: This project is for educational and learning purposes only.
 
@@ -19,13 +19,15 @@ Node backend for [Xboard](https://github.com/cedar2025/Xboard). Supports `sing-b
 ```bash
 docker run -d --restart=always --network=host \
   -e apiHost=https://panel.com -e apiKey=TOKEN -e nodeID=1 \
-  ghcr.io/cedar2025/xboard-node:latest
+  ghcr.io/furina-lee/xboard-node:latest
 ```
+
+For machine mode, set `MACHINE_ID` instead of `nodeID`, and use the machine token as `apiKey`. The image supports Linux AMD64 and ARM64.
 
 ### Docker Compose
 
 ```bash
-git clone -b compose --depth 1 https://github.com/cedar2025/xboard-node.git
+git clone -b compose --depth 1 https://github.com/Furina-Lee/Xboard-Node.git xboard-node
 cd xboard-node
 vim config/config.yml   # set panel.url / token / node_id
 docker compose up -d
@@ -35,12 +37,13 @@ docker compose up -d
 
 ```bash
 # Node mode
-curl -fsSL https://raw.githubusercontent.com/cedar2025/xboard-node/dev/install.sh | \
-  sudo bash -s -- --mode node --panel https://panel.example.com --token TOKEN --node-id 1
+curl -fsSL https://raw.githubusercontent.com/Furina-Lee/Xboard-Node/v1.13-furina.1/install.sh | \
+  sudo bash -s -- --mode node --panel https://panel.example.com --token TOKEN --node-id 1 --version v1.13-furina.1
 
 # Machine mode
-curl -fsSL https://raw.githubusercontent.com/cedar2025/xboard-node/dev/install.sh | \
-  sudo bash -s -- --mode machine --panel https://panel.example.com --token TOKEN --machine-id 1
+curl -fsSL https://raw.githubusercontent.com/Furina-Lee/Xboard-Node/v1.13-furina.1/install.sh | \
+  sudo bash -s -- --mode machine --panel https://panel.example.com --token TOKEN --machine-id 1 --version v1.13-furina.1
+```
 
 ## xbctl
 
