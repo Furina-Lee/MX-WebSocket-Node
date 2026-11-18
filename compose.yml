@@ -1,10 +1,10 @@
 # XrayR-style: ./config on the host is mounted to /etc/xboard-node in the container.
-# Run all commands from this directory: cd compose && docker compose up -d
+# Run all commands from this directory: docker compose up -d
 # See README.md in this folder.
 
 services:
   xboard-node:
-    image: ghcr.io/cedar2025/xboard-node:latest
+    image: ${XBOARD_NODE_IMAGE:-ghcr.io/furina-lee/xboard-node:v1.13-furina.1}
     container_name: xboard-node
     network_mode: host
     restart: unless-stopped

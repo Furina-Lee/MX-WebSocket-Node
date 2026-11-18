@@ -3,7 +3,7 @@
 ## Quick start
 
 ```bash
-git clone -b compose --depth 1 https://github.com/cedar2025/xboard-node.git
+git clone -b compose --depth 1 https://github.com/Furina-Lee/Xboard-Node.git xboard-node
 cd xboard-node
 # Edit config/config.yml: panel.url, panel.token, panel.node_id
 docker compose up -d
@@ -12,7 +12,6 @@ docker compose up -d
 ## Update / logs / stop
 
 ```bash
-cd compose
 docker compose pull && docker compose up -d
 docker compose logs -f
 docker compose down
@@ -33,4 +32,4 @@ docker compose down
 
 ## Image
 
-Default: `ghcr.io/cedar2025/xboard-node:latest`.
+Default: `ghcr.io/furina-lee/xboard-node:v1.13-furina.1`. Set `XBOARD_NODE_IMAGE` in the Compose project environment to use a different image or tag.
