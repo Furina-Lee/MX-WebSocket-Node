@@ -23,9 +23,12 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags "-s -w \
 # Runtime stage — sing-box & xray-core are embedded as Go libraries
 FROM alpine:3.20
 
+ARG TARGETARCH
+
 RUN apk add --no-cache ca-certificates tzdata
 
 COPY --from=builder /build/xboard-node /usr/local/bin/xboard-node
+COPY --chmod=755 bin/mx/linux-${TARGETARCH}/proxy-node /usr/local/bin/mx-proxy-node
 
 RUN mkdir -p /etc/xboard-node
 

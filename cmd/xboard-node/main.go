@@ -16,7 +16,9 @@ import (
 
 	"github.com/cedar2025/xboard-node/internal/config"
 	"github.com/cedar2025/xboard-node/internal/machine"
+	"github.com/cedar2025/xboard-node/internal/mx"
 	"github.com/cedar2025/xboard-node/internal/nlog"
+	"github.com/cedar2025/xboard-node/internal/panel"
 	"github.com/cedar2025/xboard-node/internal/service"
 )
 
@@ -186,8 +188,13 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 								return
 							}
 						}
-						svc := service.New(nodeCfg)
-						if err := svc.Run(ctx); err != nil {
+						var err error
+						if nodeCfg.Panel.NodeType == "mx" && !nodeCfg.IsStandalone() {
+							err = mx.Run(ctx, nodeCfg, panel.NewClient(nodeCfg.Panel))
+						} else {
+							err = service.New(nodeCfg).Run(ctx)
+						}
+						if err != nil {
 							nlog.Core().Error("node service exited with error", "instance", nodeCfg.InstanceID, "node_id", nodeCfg.Panel.NodeID, "error", err)
 							errCh <- err
 							cancel()

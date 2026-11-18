@@ -13,6 +13,7 @@ import (
 	"github.com/cedar2025/xboard-node/internal/controlplane"
 	"github.com/cedar2025/xboard-node/internal/model"
 	"github.com/cedar2025/xboard-node/internal/monitor"
+	"github.com/cedar2025/xboard-node/internal/mx"
 	"github.com/cedar2025/xboard-node/internal/nlog"
 	"github.com/cedar2025/xboard-node/internal/panel"
 	"github.com/cedar2025/xboard-node/internal/service"
@@ -127,13 +128,21 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 	o.nodes[mn.ID] = &nodeHandle{cancel: cancel, done: done, mailbox: mb}
 	o.mu.Unlock()
 
+	nodeCfg := o.cfg.ExpandMachineNode(mn.ID, mn.Type)
+	perNodeClient := o.client.ForNode(mn.ID)
+	if mn.Type == "mx" {
+		go func() {
+			defer close(done)
+			if err := mx.Run(nodeCtx, nodeCfg, perNodeClient); err != nil {
+				nlog.Core().Error("MX node failed", "node_id", mn.ID, "error", err)
+			}
+		}()
+		return
+	}
+
 	o.eventsMu.Lock()
 	o.mailboxes[mn.ID] = mb
 	o.eventsMu.Unlock()
-
-	nodeCfg := o.cfg.ExpandMachineNode(mn.ID, mn.Type)
-
-	perNodeClient := o.client.ForNode(mn.ID)
 
 	// Pre-fetch node config to detect transport-based kernel requirements.
 	// If the transport (e.g. xhttp) is incompatible with the configured kernel

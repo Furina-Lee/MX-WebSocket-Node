@@ -69,6 +69,15 @@ jobs:
           name: xbctl-${{ matrix.goos }}-${{ matrix.goarch }}
           path: xbctl-${{ matrix.goos }}-${{ matrix.goarch }}
 
+      - name: Stage MX worker
+        run: cp "bin/mx/linux-${{ matrix.goarch }}/proxy-node" "mx-proxy-node-linux-${{ matrix.goarch }}"
+
+      - name: Upload MX worker artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mx-proxy-node-linux-${{ matrix.goarch }}
+          path: mx-proxy-node-linux-${{ matrix.goarch }}
+
   build-docker:
     name: Build & Push Docker Image
     runs-on: ubuntu-latest
@@ -131,3 +140,5 @@ jobs:
             dist/xboard-node-linux-arm64
             dist/xbctl-linux-amd64
             dist/xbctl-linux-arm64
+            dist/mx-proxy-node-linux-amd64
+            dist/mx-proxy-node-linux-arm64

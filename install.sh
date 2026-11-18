@@ -18,6 +18,7 @@ BINARY_PATH="/usr/local/bin/xboard-node"
 SERVICE_NAME="xboard-node.service"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
 CLI_PATH="/usr/local/bin/xbctl"
+MX_BINARY_PATH="/usr/local/bin/mx-proxy-node"
 INSTALLER_COPY_PATH="${INSTALL_ROOT}/install.sh"
 CLI_BINARY_SOURCE=""
 DEFAULT_HEALTH_PORT=65530
@@ -119,6 +120,11 @@ rollback_install() {
             install -m 755 "$BACKUP_PATH/xbctl" "$CLI_PATH"
         else
             rm -f "$CLI_PATH"
+        fi
+        if [ -f "$BACKUP_PATH/mx-proxy-node" ]; then
+            install -m 755 "$BACKUP_PATH/mx-proxy-node" "$MX_BINARY_PATH"
+        else
+            rm -f "$MX_BINARY_PATH"
         fi
         if [ -f "$BACKUP_PATH/${SERVICE_NAME}" ]; then
             install -m 644 "$BACKUP_PATH/${SERVICE_NAME}" "$SERVICE_PATH"
@@ -543,6 +549,21 @@ stage_xbctl() {
     fi
 }
 
+stage_mx() {
+    local status
+    local staged="$TMP_DIR/mx-proxy-node"
+    resolve_download_url "mx-proxy-node-linux-${ARCH}"
+    if status=$(curl -fsSL -w '%{http_code}' "$DOWNLOAD_URL" -o "$staged"); then
+        return
+    fi
+    rm -f "$staged"
+    if [ "$status" = "404" ] && [[ "$RELEASE_VERSION" =~ ^v1\.13-furina\.[123]$ ]]; then
+        return 0
+    fi
+    log_error "Failed to download the MX binary (HTTP $status)"
+    return 1
+}
+
 render_config() {
     local init_args=(
         config init
@@ -622,6 +643,9 @@ backup_existing_state() {
     if [ -x "$CLI_PATH" ]; then
         cp "$CLI_PATH" "$BACKUP_PATH/xbctl"
     fi
+    if [ -x "$MX_BINARY_PATH" ]; then
+        cp "$MX_BINARY_PATH" "$BACKUP_PATH/mx-proxy-node"
+    fi
     if [ -f "$CONFIG_FILE" ]; then
         cp "$CONFIG_FILE" "$BACKUP_PATH/config.yml"
     fi
@@ -655,6 +679,9 @@ install_staged_files() {
         install -m 755 "$0" "$INSTALLER_COPY_PATH"
     fi
     install -m 755 "$TMP_DIR/xbctl" "$CLI_PATH"
+    if [ -f "$TMP_DIR/mx-proxy-node" ]; then
+        install -m 755 "$TMP_DIR/mx-proxy-node" "$MX_BINARY_PATH"
+    fi
     ln -sf "$CLI_PATH" /usr/bin/xbctl 2>/dev/null || true
     install -m 644 "$TMP_DIR/${SERVICE_NAME}" "$SERVICE_PATH"
     systemctl daemon-reload
@@ -710,6 +737,7 @@ perform_install() {
     ensure_dirs
     stage_binary
     stage_xbctl
+    stage_mx
     render_config
     render_service
     backup_existing_state
@@ -737,10 +765,14 @@ perform_upgrade() {
     ensure_dirs
     stage_binary
     stage_xbctl
+    stage_mx
     render_service
     backup_existing_state
     install -m 755 "$TMP_DIR/xboard-node" "$BINARY_PATH"
     install -m 755 "$TMP_DIR/xbctl" "$CLI_PATH"
+    if [ -f "$TMP_DIR/mx-proxy-node" ]; then
+        install -m 755 "$TMP_DIR/mx-proxy-node" "$MX_BINARY_PATH"
+    fi
     ln -sf "$CLI_PATH" /usr/bin/xbctl 2>/dev/null || true
     install -m 644 "$TMP_DIR/${SERVICE_NAME}" "$SERVICE_PATH"
     systemctl daemon-reload
@@ -774,6 +806,7 @@ perform_uninstall() {
         systemctl daemon-reload || true
     fi
     rm -f "$BINARY_PATH"
+    rm -f "$MX_BINARY_PATH"
     rm -f "$CLI_PATH"
     rm -f /usr/bin/xbctl 2>/dev/null || true
     if [ "$PURGE" -eq 1 ]; then
