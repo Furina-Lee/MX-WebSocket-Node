@@ -42,4 +42,4 @@ docker compose down
 
 ## Image
 
-Default: `ghcr.io/furina-lee/xboard-node:v1.13-furina.1`. Set `XBOARD_NODE_IMAGE` in the Compose project environment to use a different image or tag.
+Default: `ghcr.io/furina-lee/xboard-node:v1.13-furina.2`. Set `XBOARD_NODE_IMAGE` in the Compose project environment to use a different image or tag.
