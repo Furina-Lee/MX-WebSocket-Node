@@ -38,7 +38,7 @@ docker run -d --name xboard-node --restart unless-stopped --network host \
   -e API_HOST=https://panel.example.com \
   -e MACHINE_ID=12 \
   -e MACHINE_TOKEN=YOUR_MACHINE_TOKEN \
-  ghcr.io/furina-lee/xboard-node:v1.13-furina.5
+  ghcr.io/furina-lee/xboard-node:v1.13-furina.6
 ```
 
 单节点模式改用 `API_KEY` 和 `NODE_ID`，并移除 `MACHINE_ID` 与 `MACHINE_TOKEN`。单独部署 MX 时还需设置 `NODE_TYPE=mx`。也可以挂载包含 `config.yml` 的目录到 `/etc/xboard-node`。
@@ -48,7 +48,7 @@ docker run -d --name xboard-node --restart unless-stopped --network host \
 下载对应版本的脚本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Furina-Lee/Xboard-Node/v1.13-furina.5/install.sh -o xboard-node-install.sh
+curl -fsSL https://raw.githubusercontent.com/Furina-Lee/Xboard-Node/v1.13-furina.6/install.sh -o xboard-node-install.sh
 ```
 
 机器模式：
@@ -56,7 +56,7 @@ curl -fsSL https://raw.githubusercontent.com/Furina-Lee/Xboard-Node/v1.13-furina
 ```bash
 sudo bash xboard-node-install.sh install --mode machine \
   --panel https://panel.example.com --token YOUR_MACHINE_TOKEN --machine-id 12 \
-  --version v1.13-furina.5
+  --version v1.13-furina.6
 ```
 
 单节点模式：
@@ -64,7 +64,7 @@ sudo bash xboard-node-install.sh install --mode machine \
 ```bash
 sudo bash xboard-node-install.sh install --mode node \
   --panel https://panel.example.com --token YOUR_SERVER_TOKEN --node-id 7 \
-  --version v1.13-furina.5
+  --version v1.13-furina.6
 ```
 
 单节点 MX 在命令中加入 `--node-type mx`。脚本会按 CPU 架构安装节点程序、`xbctl` 和 MX 进程。配置目录为 `/etc/xboard-node`。
@@ -101,9 +101,9 @@ MX 的 Linux 二进制位于 `bin/mx/`，按目标架构随节点程序安装。
 ## 在面板启用 MX
 
 1. 在 Xboard 创建 MX 节点，配置监听端口、传输和 TLS，并在机器模式下绑定已有机器。
-2. 升级该机器上的 Xboard-Node 到 `v1.13-furina.5`。发现 MX 节点后，进程会自动拉取配置和用户。单节点模式请明确指定 `node_type: mx`。
+2. 升级该机器上的 Xboard-Node 到 `v1.13-furina.6`。发现 MX 节点后，进程会自动拉取配置和用户。单节点模式请明确指定 `node_type: mx`。
 3. TLS 使用本机已有证书时，在节点配置的 `cert.cert_file` 和 `cert.key_file` 设置文件路径。Docker 中使用容器可读的挂载路径。启用正式 TLS 时请用客户端验证证书信任链与域名。
-4. 查看日志，确认 MX 已拉取用户并监听面板设置的端口。MX 流量走适配接口，需用真实 MX 客户端验证用量上报及配额耗尽后的存量连接行为，再用于计费生产流量。
+4. 查看日志，确认 MX 已拉取用户并监听面板设置的端口。MX 流量经适配接口上报。面板从用户列表移除超额用户时，Xboard-Node 会正常停止并重启对应 MX 进程，关闭该节点的现有连接。该节点的其他用户也会短暂断线，可重新连接。
 
 默认 MX 可执行文件位于 `/usr/local/bin/mx-proxy-node`。自管二进制可以用 `XBOARD_MX_BINARY` 覆盖为绝对路径。
 
@@ -114,15 +114,15 @@ MX 的 Linux 二进制位于 `bin/mx/`，按目标架构随节点程序安装。
 **systemd**：下载本版本脚本后执行升级。脚本使用已有配置，备份并重启服务。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Furina-Lee/Xboard-Node/v1.13-furina.5/install.sh -o xboard-node-install.sh &&
-sudo bash xboard-node-install.sh upgrade --version v1.13-furina.5
+curl -fsSL https://raw.githubusercontent.com/Furina-Lee/Xboard-Node/v1.13-furina.6/install.sh -o xboard-node-install.sh &&
+sudo bash xboard-node-install.sh upgrade --version v1.13-furina.6
 sudo xbctl version
 sudo systemctl is-active xboard-node
 ```
 
 首次升级到 MX 版本请用上述脚本，以便同时安装 MX 进程。已有 MX 进程的部署应继续用脚本更新配套二进制。
 
-**Docker Compose**：在现有部署目录把 `XBOARD_NODE_IMAGE` 或 Compose 中的 `image:` 改为 `ghcr.io/furina-lee/xboard-node:v1.13-furina.5`，再执行：
+**Docker Compose**：在现有部署目录把 `XBOARD_NODE_IMAGE` 或 Compose 中的 `image:` 改为 `ghcr.io/furina-lee/xboard-node:v1.13-furina.6`，再执行：
 
 ```bash
 docker compose config --images

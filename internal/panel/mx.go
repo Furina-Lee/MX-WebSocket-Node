@@ -15,7 +15,7 @@ var mxEndpoints = map[string]string{
 
 // ForwardMX preserves the wire format expected by proxy-node while using the
 // configured panel credentials and this client's fixed node binding.
-func (c *Client) ForwardMX(ctx context.Context, w http.ResponseWriter, r *http.Request, endpoint string, body []byte) {
+func (c *Client) ForwardMX(ctx context.Context, w http.ResponseWriter, r *http.Request, endpoint string, body []byte, observeUsers func([]User)) {
 	method, ok := mxEndpoints[endpoint]
 	if !ok || r.Method != method {
 		http.NotFound(w, r)
@@ -74,10 +74,33 @@ func (c *Client) ForwardMX(ctx context.Context, w http.ResponseWriter, r *http.R
 		_ = json.NewEncoder(w).Encode(settings)
 		return
 	}
+	var users []User
+	var response io.Reader = resp.Body
+	if endpoint == "user" && resp.StatusCode == http.StatusOK {
+		payload, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20+1))
+		var snapshot struct {
+			Users []User `json:"users"`
+		}
+		if err != nil || len(payload) > 32<<20 || json.Unmarshal(payload, &snapshot) != nil || snapshot.Users == nil {
+			http.Error(w, "invalid MX user snapshot", http.StatusBadGateway)
+			return
+		}
+		for _, user := range snapshot.Users {
+			if user.ID <= 0 || user.UUID == "" {
+				http.Error(w, "invalid MX user", http.StatusBadGateway)
+				return
+			}
+		}
+		users = snapshot.Users
+		response = bytes.NewReader(payload)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if value := resp.Header.Get("ETag"); value != "" {
 		w.Header().Set("ETag", value)
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	_, _ = io.Copy(w, response)
+	if users != nil {
+		observeUsers(users)
+	}
 }

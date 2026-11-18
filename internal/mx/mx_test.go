@@ -34,7 +34,7 @@ func TestRelayUsesFixedMachineBinding(t *testing.T) {
 		}
 	}))
 	defer upstream.Close()
-	relay := handler(panel.NewClient(config.PanelConfig{URL: upstream.URL, Token: "panel-token", MachineID: 3, NodeID: 7}), "local-token", "7")
+	relay := handler(panel.NewClient(config.PanelConfig{URL: upstream.URL, Token: "panel-token", MachineID: 3, NodeID: 7}), "local-token", "7", nil)
 
 	send := func(method, path, body string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -58,5 +58,51 @@ func TestRelayUsesFixedMachineBinding(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("upstream calls = %d, want 2", calls)
+	}
+}
+
+func TestRelayRestartsOnlyForAuthoritativeRevocations(t *testing.T) {
+	var response string
+	var code int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(code)
+		_, _ = w.Write([]byte(response))
+	}))
+	defer upstream.Close()
+	restarts := make(chan struct{}, 1)
+	relay := handler(panel.NewClient(config.PanelConfig{URL: upstream.URL, NodeID: 7}), "local-token", "7", restarts)
+
+	for _, tc := range []struct {
+		payload     string
+		input, want int
+		restart     bool
+	}{
+		{`{"users":[{"id":1,"uuid":"first"},{"id":2,"uuid":"second"}]}`, 200, 200, false},
+		{``, 304, 304, false},
+		{`{}`, 500, 502, false},
+		{`{"users":null}`, 200, 502, false},
+		{`{"users":[{"id":1}]}`, 200, 502, false},
+		{`{"users":[{"id":2,"uuid":"second"}]}`, 200, 200, true},
+		{`{"users":[{"id":2,"uuid":"second"}]}`, 200, 200, false},
+		{`{"users":[{"id":2,"uuid":"new-key"}]}`, 200, 200, true},
+		{`{"users":[]}`, 200, 200, true},
+		{`{"users":[]}`, 200, 200, false},
+		{`{"users":[{"id":3,"uuid":"third"}]}`, 200, 200, false},
+	} {
+		response, code = tc.payload, tc.input
+		w := httptest.NewRecorder()
+		relay.ServeHTTP(w, httptest.NewRequest("GET", "/api/v1/server/UniProxy/user?token=local-token&node_id=7", nil))
+		if w.Code != tc.want {
+			t.Fatalf("payload %s got status %d, want %d", tc.payload, w.Code, tc.want)
+		}
+		restarted := false
+		select {
+		case <-restarts:
+			restarted = true
+		default:
+		}
+		if restarted != tc.restart {
+			t.Fatalf("payload %s restart = %t, want %t", tc.payload, restarted, tc.restart)
+		}
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -52,8 +53,9 @@ func Run(ctx context.Context, cfg *config.Config, client *panel.Client) error {
 	var secret [32]byte
 	rand.Read(secret[:])
 	token := hex.EncodeToString(secret[:])
+	restart := make(chan struct{}, 1)
 	relay := &http.Server{
-		Handler:           handler(client, token, strconv.Itoa(cfg.Panel.NodeID)),
+		Handler:           handler(client, token, strconv.Itoa(cfg.Panel.NodeID), restart),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 35 * time.Second,
 	}
 	go func() { _ = relay.Serve(listener) }()
@@ -106,14 +108,34 @@ func Run(ctx context.Context, cfg *config.Config, client *panel.Client) error {
 	}
 
 	for ctx.Err() == nil {
-		cmd := exec.CommandContext(ctx, binary, "-c", file.Name())
+		workerCtx, stopWorker := context.WithCancel(ctx)
+		cmd := exec.CommandContext(workerCtx, binary, "-c", file.Name())
 		cmd.Dir = dir
 		// Keep machine and panel credentials out of the worker environment.
 		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "TZ=" + os.Getenv("TZ")}
 		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 		cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 		cmd.WaitDelay = 8 * time.Second
-		err := cmd.Run()
+		err := cmd.Start()
+		if err == nil {
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			select {
+			case <-restart:
+				nlog.Core().Info("restarting MX worker to close revoked user sessions", "node_id", cfg.Panel.NodeID)
+				stopWorker()
+				<-done
+				// Removals seen during graceful shutdown are included when
+				// the new worker starts with a fresh panel user list.
+				select {
+				case <-restart:
+				default:
+				}
+				continue
+			case err = <-done:
+			}
+		}
+		stopWorker()
 		if ctx.Err() != nil {
 			break
 		}
@@ -126,7 +148,25 @@ func Run(ctx context.Context, cfg *config.Config, client *panel.Client) error {
 	return nil
 }
 
-func handler(client *panel.Client, token, nodeID string) http.Handler {
+func handler(client *panel.Client, token, nodeID string, restart chan<- struct{}) http.Handler {
+	var usersMu sync.Mutex
+	var previous map[int]string
+	observeUsers := func(users []panel.User) {
+		current := make(map[int]string, len(users))
+		for _, user := range users {
+			current[user.ID] = user.UUID
+		}
+		for id, uuid := range previous {
+			if current[id] != uuid {
+				select {
+				case restart <- struct{}{}:
+				default:
+				}
+				break
+			}
+		}
+		previous = current
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		if subtle.ConstantTimeCompare([]byte(query.Get("token")), []byte(token)) != 1 || query.Get("node_id") != nodeID {
@@ -157,6 +197,12 @@ func handler(client *panel.Client, token, nodeID string) http.Handler {
 			}
 			body, _ = json.Marshal(fields)
 		}
-		client.ForwardMX(r.Context(), w, r, endpoint, body)
+		if endpoint == "user" && r.Method == http.MethodGet {
+			// Keep concurrent snapshots ordered so an older response cannot
+			// recreate the baseline after a removal.
+			usersMu.Lock()
+			defer usersMu.Unlock()
+		}
+		client.ForwardMX(r.Context(), w, r, endpoint, body, observeUsers)
 	})
 }
