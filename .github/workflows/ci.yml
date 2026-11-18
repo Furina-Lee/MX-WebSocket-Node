@@ -98,6 +98,8 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            VERSION=${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || github.sha }}
           platforms: linux/amd64,linux/arm64
           labels: org.opencontainers.image.source=https://github.com/Furina-Lee/Xboard-Node
           tags: |

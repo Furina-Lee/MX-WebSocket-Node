@@ -37,12 +37,12 @@ docker compose up -d
 
 ```bash
 # Node mode
-curl -fsSL https://raw.githubusercontent.com/Furina-Lee/Xboard-Node/v1.13-furina.1/install.sh | \
-  sudo bash -s -- --mode node --panel https://panel.example.com --token TOKEN --node-id 1 --version v1.13-furina.1
+curl -fsSL https://raw.githubusercontent.com/Furina-Lee/Xboard-Node/v1.13-furina.2/install.sh | \
+  sudo bash -s -- --mode node --panel https://panel.example.com --token TOKEN --node-id 1 --version v1.13-furina.2
 
 # Machine mode
-curl -fsSL https://raw.githubusercontent.com/Furina-Lee/Xboard-Node/v1.13-furina.1/install.sh | \
-  sudo bash -s -- --mode machine --panel https://panel.example.com --token TOKEN --machine-id 1 --version v1.13-furina.1
+curl -fsSL https://raw.githubusercontent.com/Furina-Lee/Xboard-Node/v1.13-furina.2/install.sh | \
+  sudo bash -s -- --mode machine --panel https://panel.example.com --token TOKEN --machine-id 1 --version v1.13-furina.2
 ```
 
 ## xbctl
