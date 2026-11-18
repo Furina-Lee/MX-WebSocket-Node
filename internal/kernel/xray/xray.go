@@ -448,6 +448,13 @@ func (x *Xray) UpdateUsers(users []model.UserSpec) (added, removed int, err erro
 	toAdd, toRemove := kernel.UserDiff(x.users, users)
 	added, removed = len(toAdd), len(toRemove)
 
+	if len(users) == 0 {
+		x.mu.Unlock()
+		x.updateDispatcherLimits(nil)
+		x.Stop()
+		return
+	}
+
 	if added == 0 && removed == 0 {
 		// Only limits changed — update dispatcher without restart.
 		x.users = users

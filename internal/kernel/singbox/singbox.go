@@ -463,6 +463,7 @@ func (s *SingBox) AddUsers(users []model.UserSpec) (int, error) {
 	if err := s.reloadInboundsLocked(merged); err != nil {
 		return 0, err
 	}
+	s.updateTrackerUsersLocked(merged)
 	s.users = merged
 	return len(toAdd), nil
 }
@@ -494,6 +495,13 @@ func (s *SingBox) RemoveUsers(users []model.UserSpec) (int, error) {
 		return 0, nil
 	}
 
+	s.updateTrackerUsersLocked(kept)
+	if len(kept) == 0 {
+		s.stop()
+		s.users = nil
+		return removed, nil
+	}
+
 	if err := s.reloadInboundsLocked(kept); err != nil {
 		return 0, err
 	}
@@ -513,9 +521,14 @@ func (s *SingBox) UpdateUsers(users []model.UserSpec) (added, removed int, err e
 	toAdd, toRemove := kernel.UserDiff(s.users, users)
 	added, removed = len(toAdd), len(toRemove)
 
+	s.updateTrackerUsersLocked(users)
+	if len(users) == 0 {
+		s.stop()
+		s.users = nil
+		return
+	}
+
 	if added == 0 && removed == 0 {
-		// Only limits may have changed — update tracker map.
-		s.updateTrackerUsersLocked(users)
 		s.users = users
 		return 0, 0, nil
 	}
@@ -612,8 +625,6 @@ func (s *SingBox) reloadInboundsLocked(users []model.UserSpec) error {
 			return fmt.Errorf("recreate inbound %s: %w", tag, err)
 		}
 	}
-
-	s.updateTrackerUsersLocked(users)
 
 	nlog.Core().Debug("sing-box users hot-swapped", "users", len(users))
 	return nil

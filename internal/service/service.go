@@ -912,7 +912,10 @@ func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged 
 	}
 
 	if s.lastConfig == nil || len(s.lastUsers) == 0 {
-		if len(s.lastUsers) == 0 {
+		if len(s.lastUsers) == 0 && s.kernel.IsRunning() {
+			if _, _, err := s.kernel.UpdateUsers(nil); err != nil {
+				nlog.Core().Warn("failed to revoke users before stopping kernel", "error", err)
+			}
 			s.kernel.Stop()
 			s.appliedState.Users = nil
 		}
