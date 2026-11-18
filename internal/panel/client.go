@@ -38,6 +38,7 @@ type Client struct {
 
 	configETag string
 	userETag   string
+	lastUsers  []User
 
 	apiSuccess atomic.Uint64
 	apiFailure atomic.Uint64
@@ -108,7 +109,7 @@ func (c *Client) Handshake() (*HandshakeResponse, error) {
 // without changing the core schema of status.
 func (c *Client) Report(traffic map[int][2]int64, alive map[int][]string, online map[int]int,
 	cpu float64, mem, swap, disk [2]uint64,
-	metrics map[string]interface{},
+	metrics map[string]interface{}, reportID string,
 ) error {
 	payload := make(map[string]interface{})
 
@@ -118,6 +119,9 @@ func (c *Client) Report(traffic map[int][2]int64, alive map[int][]string, online
 			t[strconv.Itoa(uid)] = d
 		}
 		payload["traffic"] = t
+		if reportID != "" {
+			payload["report_id"] = reportID
+		}
 		defer func() {
 			for k := range t {
 				delete(t, k)
@@ -277,7 +281,21 @@ func (c *Client) GetUsers() ([]User, error) {
 	if etag := resp.Header.Get("ETag"); etag != "" {
 		c.userETag = etag
 	}
+	c.lastUsers = usersResp.Users
 	return usersResp.Users, nil
+}
+
+// GetUsersSnapshot returns the last confirmed REST snapshot even on HTTP 304.
+// Push updates may have changed the node's live user list in the meantime.
+func (c *Client) GetUsersSnapshot() ([]User, error) {
+	users, err := c.GetUsers()
+	if err != nil {
+		return nil, err
+	}
+	if users == nil {
+		return c.lastUsers, nil
+	}
+	return users, nil
 }
 
 // PushTraffic submits per-user traffic data

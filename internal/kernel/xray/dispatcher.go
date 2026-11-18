@@ -61,10 +61,9 @@ func limitDispatcherFactory(ctx context.Context, config interface{}) (interface{
 // LimitDispatcher wraps xray's DefaultDispatcher to enforce per-user
 // admission checks before a request is dispatched into xray-core.
 //
-// It intentionally does NOT mutate transport.Link.Reader/Writer. Xray's
-// mux/XUDP close path requires the original concrete *pipe.Reader to remain
-// intact, so the dispatcher is limited to gate-keeping and safe connection
-// lifecycle bookkeeping.
+// Keep the original Reader intact for Xray's mux/XUDP close path. A writer
+// wrapper tracks link lifetime, and both original pipe ends can be interrupted
+// when the user is revoked.
 type LimitDispatcher struct {
 	inner     interface{}        // original DefaultDispatcher (Feature + Dispatcher)
 	innerDisp routing.Dispatcher // same object, typed as Dispatcher
@@ -74,7 +73,8 @@ type LimitDispatcher struct {
 	mu           sync.RWMutex
 	limitedIPs   map[string]map[string]int // email → sourceIP → refcount
 	deviceLimits map[string]int            // email → max devices
-	emailToUID   map[string]int            // email → panel user ID
+	links        map[string]map[*closeTrackingWriter]func()
+	emailToUID   map[string]int // email → panel user ID
 
 	// unlimitedIPs: users without device limit — sync.Map for lock-free access.
 	// Each entry is *ipCounter{ips sync.Map}.
@@ -116,8 +116,8 @@ func (d *LimitDispatcher) Dispatch(ctx context.Context, dest net.Destination) (*
 		return nil, err
 	}
 
-	if email != "" {
-		d.trackLink(link, email, sourceIP, isTCP)
+	if email != "" && !d.trackLink(link, email, sourceIP, isTCP) {
+		return nil, errors.New("user is no longer authorized")
 	}
 	return link, nil
 }
@@ -128,8 +128,8 @@ func (d *LimitDispatcher) DispatchLink(ctx context.Context, dest net.Destination
 		return err
 	}
 
-	if email != "" {
-		d.trackLink(link, email, sourceIP, isTCP)
+	if email != "" && !d.trackLink(link, email, sourceIP, isTCP) {
+		return errors.New("user is no longer authorized")
 	}
 	return d.innerDisp.DispatchLink(ctx, dest, link)
 }
@@ -146,6 +146,14 @@ func (d *LimitDispatcher) identifyAndCheck(ctx context.Context, dest net.Destina
 	sourceIP = si.Source.Address.IP().String()
 	isTCP = dest.Network == net.Network_TCP
 
+	d.mu.RLock()
+	_, allowed := d.emailToUID[email]
+	initialized := d.emailToUID != nil
+	d.mu.RUnlock()
+	if initialized && !allowed {
+		return "", "", false, errors.New("user is no longer authorized")
+	}
+
 	if d.checkDeviceLimit(email, sourceIP, isTCP) {
 		nlog.Core().Debug("xray: device limit exceeded", "email", email, "ip", sourceIP)
 		return "", "", false, errors.New("device limit exceeded for " + email)
@@ -156,20 +164,46 @@ func (d *LimitDispatcher) identifyAndCheck(ctx context.Context, dest net.Destina
 // trackLink records connection lifecycle without mutating xray-core owned
 // transport primitives. This keeps mux/XUDP compatible while still allowing
 // the dispatcher to release device-limit state when the link closes.
-func (d *LimitDispatcher) trackLink(link *transport.Link, email, sourceIP string, isTCP bool) {
-	d.connCount.Add(1)
+func (d *LimitDispatcher) trackLink(link *transport.Link, email, sourceIP string, isTCP bool) bool {
+	d.mu.Lock()
+	if _, allowed := d.emailToUID[email]; d.emailToUID != nil && !allowed {
+		d.mu.Unlock()
+		if isTCP {
+			d.delConn(email, sourceIP)
+		}
+		common.Interrupt(link.Reader)
+		common.Interrupt(link.Writer)
+		return false
+	}
 
-	onClose := func() {
+	if d.links == nil {
+		d.links = make(map[string]map[*closeTrackingWriter]func())
+	}
+	if d.links[email] == nil {
+		d.links[email] = make(map[*closeTrackingWriter]func())
+	}
+	d.connCount.Add(1)
+	reader := link.Reader
+	writer := &closeTrackingWriter{Writer: link.Writer}
+	writer.onClose = func() {
+		d.mu.Lock()
+		delete(d.links[email], writer)
+		if len(d.links[email]) == 0 {
+			delete(d.links, email)
+		}
+		d.mu.Unlock()
 		if isTCP {
 			d.delConn(email, sourceIP)
 		}
 		d.connCount.Add(-1)
 	}
-
-	link.Writer = &closeTrackingWriter{
-		Writer:  link.Writer,
-		onClose: onClose,
+	d.links[email][writer] = func() {
+		common.Interrupt(reader)
+		writer.Interrupt()
 	}
+	link.Writer = writer
+	d.mu.Unlock()
+	return true
 }
 
 // ─── features.Feature (delegated) ───────────────────────────────────────────
@@ -196,8 +230,19 @@ func (d *LimitDispatcher) UpdateLimits(emailToUID map[string]int, deviceLimits, 
 	d.mu.Lock()
 	d.emailToUID = emailToUID
 	d.deviceLimits = deviceLimits
+	var revoked []func()
+	for email, links := range d.links {
+		if _, allowed := emailToUID[email]; !allowed {
+			for _, interrupt := range links {
+				revoked = append(revoked, interrupt)
+			}
+		}
+	}
 	d.mu.Unlock()
 
+	for _, interrupt := range revoked {
+		interrupt()
+	}
 }
 
 func (d *LimitDispatcher) ResetConns() {

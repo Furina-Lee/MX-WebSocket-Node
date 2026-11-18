@@ -36,8 +36,6 @@ func TestSingBoxCapabilities(t *testing.T) {
 	}
 }
 
-
-
 type testConn struct {
 	closed bool
 	reads  [][]byte
@@ -60,11 +58,11 @@ func (c *testConn) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-func (c *testConn) Close() error { c.closed = true; return nil }
-func (c *testConn) LocalAddr() net.Addr { return &net.TCPAddr{} }
-func (c *testConn) RemoteAddr() net.Addr { return &net.TCPAddr{} }
-func (c *testConn) SetDeadline(time.Time) error { return nil }
-func (c *testConn) SetReadDeadline(time.Time) error { return nil }
+func (c *testConn) Close() error                     { c.closed = true; return nil }
+func (c *testConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (c *testConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (c *testConn) SetDeadline(time.Time) error      { return nil }
+func (c *testConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *testConn) SetWriteDeadline(time.Time) error { return nil }
 
 func testInboundContext(uuid, ip string) adapter.InboundContext {
@@ -211,5 +209,23 @@ func TestConnTrackerRateLimitHonorsContextCancellation(t *testing.T) {
 	cancelWrite()
 	if n, err := writeTracked.Write([]byte("a")); !errors.Is(err, context.Canceled) || n != 0 {
 		t.Fatalf("second Write() = (%d, %v), want (0, context canceled)", n, err)
+	}
+}
+
+func TestConnTrackerRevokesOnlyRemovedUser(t *testing.T) {
+	tracker := NewConnTracker(0)
+	tracker.SetUserMap(map[string]int{"expired": 1, "active": 2})
+	expired, active := &testConn{}, &testConn{}
+	tracker.RoutedConnection(context.Background(), expired, testInboundContext("expired", "1.1.1.1"), nil, nil)
+	keep := tracker.RoutedConnection(context.Background(), active, testInboundContext("active", "2.2.2.2"), nil, nil)
+	defer keep.Close()
+	tracker.SetUserMap(map[string]int{"active": 2})
+	if !expired.closed || active.closed || tracker.ActiveCount() != 1 {
+		t.Fatalf("expired closed=%t, active closed=%t, connections=%d", expired.closed, active.closed, tracker.ActiveCount())
+	}
+	late := &testConn{}
+	tracker.RoutedConnection(context.Background(), late, testInboundContext("expired", "1.1.1.1"), nil, nil)
+	if !late.closed {
+		t.Fatal("connection authenticated before revocation was allowed through")
 	}
 }

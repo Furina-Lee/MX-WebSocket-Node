@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -15,9 +16,9 @@ import (
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/uuid"
 	xrayCore "github.com/xtls/xray-core/core"
+	featurebandwidth "github.com/xtls/xray-core/features/bandwidth"
 	"github.com/xtls/xray-core/features/inbound"
 	"github.com/xtls/xray-core/features/stats"
-	featurebandwidth "github.com/xtls/xray-core/features/bandwidth"
 	"github.com/xtls/xray-core/infra/conf/serial"
 	xrayProxy "github.com/xtls/xray-core/proxy"
 	"github.com/xtls/xray-core/proxy/shadowsocks"
@@ -32,8 +33,8 @@ import (
 	"github.com/cedar2025/xboard-node/internal/config"
 	"github.com/cedar2025/xboard-node/internal/kernel"
 	"github.com/cedar2025/xboard-node/internal/kernel/geodata"
-	"github.com/cedar2025/xboard-node/internal/nlog"
 	"github.com/cedar2025/xboard-node/internal/model"
+	"github.com/cedar2025/xboard-node/internal/nlog"
 )
 
 const (
@@ -52,6 +53,11 @@ const (
 //   - mu is held only for brief field swaps (microseconds).
 //   - instance.Start() and instance.Close() run OUTSIDE the lock.
 //   - running (atomic) gates fast-path checks in IsRunning / GetConnections.
+type retiringInstance struct {
+	dispatcher *LimitDispatcher
+	users      []model.UserSpec
+}
+
 type Xray struct {
 	cfg config.KernelConfig
 
@@ -67,6 +73,7 @@ type Xray struct {
 	inboundTag      string
 	lastKernelHash  string
 	cumTraffic      map[int][2]int64
+	retiring        map[*xrayCore.Instance]retiringInstance
 	speedLimitFunc  func(string) *rate.Limiter
 
 	// running is set after a successful Start and cleared before shutdown.
@@ -78,6 +85,7 @@ func New(cfg config.KernelConfig) *Xray {
 	return &Xray{
 		cfg:        cfg,
 		cumTraffic: make(map[int][2]int64),
+		retiring:   make(map[*xrayCore.Instance]retiringInstance),
 	}
 }
 
@@ -147,6 +155,9 @@ func (x *Xray) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls ker
 	x.mu.Lock()
 	old := x.instance
 	oldLD := x.limitDispatcher
+	if old != nil {
+		x.retiring[old] = retiringInstance{dispatcher: oldLD, users: x.users}
+	}
 	x.instance = inst
 	x.limitDispatcher = ld
 	x.users = users
@@ -154,13 +165,12 @@ func (x *Xray) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls ker
 	x.tls = tls
 	x.protocol = nodeConfig.Protocol
 	x.inboundTag = nodeConfig.Protocol + "-in"
-	x.cumTraffic = make(map[int][2]int64)
 	x.lastKernelHash = kernel.ComputeHash(nodeConfig, users)
 	x.running.Store(true)
 	x.mu.Unlock()
 
 	// ── Phase 5: Recycle old (background, non-blocking) ─────────────────
-	closeOld(old, oldLD)
+	x.closeOld(old, oldLD)
 
 	x.updateDispatcherLimits(users)
 	x.updateBandwidthLimits(users)
@@ -203,6 +213,9 @@ func (x *Xray) Stop() {
 	x.mu.Lock()
 	inst := x.instance
 	ld := x.limitDispatcher
+	if inst != nil {
+		x.retiring[inst] = retiringInstance{dispatcher: ld, users: x.users}
+	}
 	x.instance = nil
 	x.limitDispatcher = nil
 	x.mu.Unlock()
@@ -210,7 +223,7 @@ func (x *Xray) Stop() {
 	if ld != nil {
 		drainConns(ld, drainTimeout)
 	}
-	closeOld(inst, ld)
+	x.closeOld(inst, ld)
 }
 
 func (x *Xray) IsRunning() bool { return x.running.Load() }
@@ -226,10 +239,6 @@ func tlsEqual(a, b kernel.TLSCert) bool {
 // available. The dispatcher intentionally no longer wraps transport links,
 // so traffic accounting must come from xray-core itself.
 func (x *Xray) GetUserTraffic(_ context.Context) (traffic map[int][2]int64, aliveIPs map[int]map[string]bool, connCount int, err error) {
-	if !x.running.Load() {
-		return nil, nil, 0, nil
-	}
-
 	x.mu.Lock()
 	ld := x.limitDispatcher
 	traffic, err = x.aggregateStats()
@@ -314,7 +323,7 @@ func (x *Xray) AddUsers(users []model.UserSpec) (int, error) {
 		x.users = merged
 		x.mu.Unlock()
 		x.updateDispatcherLimits(merged)
-	x.updateBandwidthLimits(merged)
+		x.updateBandwidthLimits(merged)
 		return 0, nil
 	}
 
@@ -388,6 +397,7 @@ func (x *Xray) RemoveUsers(users []model.UserSpec) (int, error) {
 
 	if len(kept) == 0 {
 		x.mu.Unlock()
+		x.updateDispatcherLimits(nil)
 		x.Stop()
 		return removed, nil
 	}
@@ -415,10 +425,11 @@ func (x *Xray) RemoveUsers(users []model.UserSpec) (int, error) {
 		actualRemoved++
 	}
 
+	x.updateDispatcherLimits(kept)
 	x.mu.Lock()
+	x.harvestStats(x.instance, x.users)
 	x.users = kept
 	x.mu.Unlock()
-	x.updateDispatcherLimits(kept)
 	x.updateBandwidthLimits(kept)
 
 	nlog.Core().Info("xray: users removed via UserManager", "removed", actualRemoved, "total", len(kept))
@@ -483,10 +494,11 @@ func (x *Xray) UpdateUsers(users []model.UserSpec) (added, removed int, err erro
 		}
 	}
 
+	x.updateDispatcherLimits(users)
 	x.mu.Lock()
+	x.harvestStats(x.instance, x.users)
 	x.users = users
 	x.mu.Unlock()
-	x.updateDispatcherLimits(users)
 	x.updateBandwidthLimits(users)
 
 	nlog.Core().Info("xray: users updated via UserManager", "added", added, "removed", removed, "total", len(users))
@@ -671,7 +683,7 @@ func startWithTimeout(inst *xrayCore.Instance, timeout time.Duration) error {
 // closeOld shuts down a previously running instance and its dispatcher.
 // Recycling happens in a background goroutine to prevent the main thread
 // from blocking on slow connection draining, enabling "hitless" reload.
-func closeOld(inst *xrayCore.Instance, ld *LimitDispatcher) {
+func (x *Xray) closeOld(inst *xrayCore.Instance, ld *LimitDispatcher) {
 	if inst == nil {
 		return
 	}
@@ -683,6 +695,13 @@ func closeOld(inst *xrayCore.Instance, ld *LimitDispatcher) {
 			drainConns(ld, 5*time.Minute)
 		}
 		// 2. Hard close
+		if ld != nil {
+			ld.UpdateLimits(map[string]int{}, nil, nil)
+		}
+		x.mu.Lock()
+		x.harvestStats(inst, x.retiring[inst].users)
+		delete(x.retiring, inst)
+		x.mu.Unlock()
 		inst.Close()
 		if ld != nil {
 			ld.ResetConns()
@@ -703,43 +722,39 @@ func drainConns(ld *LimitDispatcher, timeout time.Duration) {
 	}
 }
 
-// aggregateStats is a fallback path that reads xray's built-in stats counters
-// when LimitDispatcher is not available. Returns per-user cumulative traffic.
+// aggregateStats samples both the active kernel and any instances still
+// draining. Cumulative counters survive reloads and user removal.
 // Must be called with x.mu held.
 func (x *Xray) aggregateStats() (map[int][2]int64, error) {
-	sm := x.instance.GetFeature(stats.ManagerType())
-	if sm == nil {
-		return nil, nil
+	x.harvestStats(x.instance, x.users)
+	for inst, retired := range x.retiring {
+		x.harvestStats(inst, retired.users)
 	}
-	mgr, ok := sm.(stats.Manager)
+	return maps.Clone(x.cumTraffic), nil
+}
+
+func (x *Xray) harvestStats(inst *xrayCore.Instance, users []model.UserSpec) {
+	if inst == nil {
+		return
+	}
+	mgr, ok := inst.GetFeature(stats.ManagerType()).(stats.Manager)
 	if !ok {
-		return nil, nil
+		return
 	}
-
-	traffic := make(map[int][2]int64)
-	for _, u := range x.users {
+	for _, u := range users {
 		email := userEmail(u.ID)
-
-		var dUp, dDown int64
+		var up, down int64
 		if c := mgr.GetCounter(fmt.Sprintf("user>>>%s>>>traffic>>>uplink", email)); c != nil {
-			dUp = c.Set(0)
+			up = c.Set(0)
 		}
 		if c := mgr.GetCounter(fmt.Sprintf("user>>>%s>>>traffic>>>downlink", email)); c != nil {
-			dDown = c.Set(0)
+			down = c.Set(0)
 		}
-
-		if dUp > 0 || dDown > 0 {
-			cum := x.cumTraffic[u.ID]
-			cum[0] += dUp
-			cum[1] += dDown
-			x.cumTraffic[u.ID] = cum
-		}
-
-		if cum := x.cumTraffic[u.ID]; cum[0] > 0 || cum[1] > 0 {
-			traffic[u.ID] = cum
+		if up > 0 || down > 0 {
+			total := x.cumTraffic[u.ID]
+			x.cumTraffic[u.ID] = [2]int64{total[0] + up, total[1] + down}
 		}
 	}
-	return traffic, nil
 }
 
 // updateBandwidthLimits configures the patched xray-core bandwidth feature
@@ -781,11 +796,16 @@ func (x *Xray) updateBandwidthLimits(users []model.UserSpec) {
 // patched xray-core bandwidth feature.
 func (x *Xray) updateDispatcherLimits(users []model.UserSpec) {
 	x.mu.Lock()
-	ld := x.limitDispatcher
-	x.mu.Unlock()
-	if ld == nil {
-		return
+	dispatchers := make([]*LimitDispatcher, 0, 1+len(x.retiring))
+	if x.limitDispatcher != nil {
+		dispatchers = append(dispatchers, x.limitDispatcher)
 	}
+	for _, retired := range x.retiring {
+		if retired.dispatcher != nil {
+			dispatchers = append(dispatchers, retired.dispatcher)
+		}
+	}
+	x.mu.Unlock()
 
 	emailToUID := make(map[string]int, len(users)*2)
 	deviceLimits := make(map[string]int)
@@ -800,7 +820,9 @@ func (x *Xray) updateDispatcherLimits(users []model.UserSpec) {
 		}
 	}
 
-	ld.UpdateLimits(emailToUID, deviceLimits, nil)
+	for _, dispatcher := range dispatchers {
+		dispatcher.UpdateLimits(emailToUID, deviceLimits, nil)
+	}
 }
 
 // xrayCreationMu serialises xrayCore.New() + globalLimitDispatcher capture

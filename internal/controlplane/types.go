@@ -49,6 +49,7 @@ type Snapshot struct {
 }
 
 type ReportPayload struct {
+	ID      string
 	Traffic map[int][2]int64
 	Alive   map[int][]string
 	Online  map[int]int

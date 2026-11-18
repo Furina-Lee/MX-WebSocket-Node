@@ -185,7 +185,6 @@ func TestLimitDispatcher_UnlimitedUserFastPath(t *testing.T) {
 	}
 }
 
-
 func TestLimitDispatcher_TrackLinkPreservesReader(t *testing.T) {
 	ld := newTestDispatcher()
 	email := userEmail(1)
@@ -231,5 +230,28 @@ func TestLimitDispatcher_CloseTrackingWriterReleasesConn(t *testing.T) {
 	}
 	if ld.checkDeviceLimit(email, "2.2.2.2", true) {
 		t.Fatal("device slot should be released after writer close")
+	}
+}
+
+type interruptibleReader struct {
+	nopReader
+	interrupted bool
+}
+
+func (r *interruptibleReader) Interrupt() { r.interrupted = true }
+
+func TestLimitDispatcherRevokesOpenLinks(t *testing.T) {
+	d := newTestDispatcher()
+	expired, active := userEmail(1), userEmail(2)
+	d.UpdateLimits(map[string]int{expired: 1, active: 2}, nil, nil)
+	expiredReader, activeReader := &interruptibleReader{}, &interruptibleReader{}
+	d.trackLink(&transport.Link{Reader: expiredReader, Writer: buf.Discard}, expired, "1.1.1.1", false)
+	link := &transport.Link{Reader: activeReader, Writer: buf.Discard}
+	d.trackLink(link, active, "2.2.2.2", false)
+	defer link.Writer.(*closeTrackingWriter).Close()
+	d.UpdateLimits(map[string]int{active: 2}, nil, nil)
+	if !expiredReader.interrupted || activeReader.interrupted || d.connCount.Load() != 1 {
+		t.Fatalf("expired interrupted=%t, active interrupted=%t, connections=%d",
+			expiredReader.interrupted, activeReader.interrupted, d.connCount.Load())
 	}
 }

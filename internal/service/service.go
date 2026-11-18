@@ -2,12 +2,12 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -54,14 +54,17 @@ type Service struct {
 	pushInterval int // seconds
 	pullInterval int // seconds
 
+	userRevision   uint64
 	lastUserHash   string     // hash of user list for change detection
 	lastConfigHash string     // hash of full config for change detection
 	pullBackoff    apiBackoff // backoff for panel pull failures
 	pushBackoff    apiBackoff // backoff for panel push failures
 
 	// pushActive prevents overlapping push/pull goroutines.
-	pushActive atomic.Bool
-	pullActive atomic.Bool
+	pushActive    atomic.Bool
+	pushWait      sync.WaitGroup
+	pendingReport *controlplane.ReportPayload
+	pullActive    atomic.Bool
 	// pullResults delivers async pullViaAPI results back to the main goroutine.
 	pullResults chan pullResult
 
@@ -80,11 +83,13 @@ type Service struct {
 
 // pullResult carries the outcome of an async pullViaAPI back to the main goroutine.
 type pullResult struct {
-	config      *model.NodeSpec
-	users       []model.UserSpec
-	configHash  string
-	userHash    string
-	certChanged bool
+	userRevision   uint64
+	baseConfigHash string
+	config         *model.NodeSpec
+	users          []model.UserSpec
+	configHash     string
+	userHash       string
+	certChanged    bool
 }
 
 // apiBackoff implements simple exponential backoff for API failures.
@@ -183,8 +188,8 @@ func (s *Service) Run(ctx context.Context) error {
 
 	// Set up tickers
 	trackTicker := time.NewTicker(time.Duration(s.cfg.Node.TrackInterval) * time.Second)
-	pushInterval := time.Duration(math.Max(float64(s.pushInterval), 5)) * time.Second
-	pullInterval := time.Duration(s.pullInterval) * time.Second
+	pushInterval := time.Duration(min(max(s.pushInterval, 5), 15)) * time.Second
+	pullInterval := time.Duration(min(s.pullInterval, 60)) * time.Second
 	reportTicker := time.NewTicker(pushInterval)
 	pullTicker := time.NewTicker(pullInterval)
 	deviceReportTicker := time.NewTicker(time.Duration(s.cfg.Node.DeviceReportInterval) * time.Second)
@@ -205,6 +210,7 @@ func (s *Service) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			s.trackAndEnforce(context.WithoutCancel(ctx))
 			s.pushReportSync()
 			return nil
 
@@ -212,18 +218,15 @@ func (s *Service) Run(ctx context.Context) error {
 			s.trackAndEnforce(ctx)
 
 		case <-reportTicker.C:
+			s.trackAndEnforce(ctx)
 			s.pushReportAsync()
 
 		case <-deviceReportTicker.C:
 			s.reportDevices()
 
 		case <-pullTicker.C:
-			// When WebSocket is connected, skip REST polling entirely.
-			// Config/user updates arrive via WS push.
-			if s.wsClient != nil && s.wsClient.IsConnected() {
-				continue
-			}
-			nlog.Core().Debug("polling from API (ws not connected)")
+			// WebSocket updates are best-effort. Reconcile authoritative
+			// quota and user state periodically even while it is connected.
 			s.pullViaAPIAsync(ctx)
 
 		case result := <-s.pullResults:
@@ -609,6 +612,7 @@ func (s *Service) pullViaAPIAsync(ctx context.Context) {
 	}
 
 	currentConfigHash := s.lastConfigHash
+	userRevision := s.userRevision
 	certChanged := s.cert.CertRenewed()
 
 	go func() {
@@ -621,7 +625,7 @@ func (s *Service) pullViaAPIAsync(ctx context.Context) {
 		}
 		s.pullBackoff.onSuccess()
 
-		result := pullResult{certChanged: certChanged}
+		result := pullResult{certChanged: certChanged, userRevision: userRevision, baseConfigHash: currentConfigHash}
 		if snapshot.Config != nil {
 			result.config = snapshot.Config
 			result.configHash = computeConfigHash(snapshot.Config)
@@ -651,7 +655,7 @@ func (s *Service) applyPullResult(ctx context.Context, result pullResult) {
 		configChanged = true
 	}
 
-	if result.config != nil {
+	if result.config != nil && result.baseConfigHash == s.lastConfigHash {
 		if err := validateNodeRuntime(s.cfg, s.kernel.Protocols(), result.config, s.cert.TLSCert()); err != nil {
 			nlog.Core().Warn("runtime config validation failed", "error", err)
 			result.config = nil
@@ -672,7 +676,7 @@ func (s *Service) applyPullResult(ctx context.Context, result pullResult) {
 		}
 	}
 
-	if result.users != nil {
+	if result.users != nil && result.userRevision == s.userRevision {
 		usersChanged := result.userHash != s.lastUserHash
 
 		if usersChanged && !configChanged {
@@ -713,6 +717,7 @@ func (s *Service) prepareUserState(users []model.UserSpec) (prevUsers []model.Us
 	s.lastUsers = append([]model.UserSpec(nil), users...)
 	s.metricsMu.Unlock()
 	s.lastUserHash = computeUserHash(users)
+	s.userRevision++
 	return prevUsers, prevHash
 }
 
@@ -751,27 +756,20 @@ func (s *Service) startKernel(nc *model.NodeSpec, users []model.UserSpec) bool {
 	return true
 }
 
-// ensureRunning starts the kernel if it is not running and there are users +
-// config available. Returns true if the kernel is running afterwards.
-func (s *Service) ensureRunning() bool {
-	if s.kernel.IsRunning() {
-		return true
-	}
-	if len(s.lastUsers) > 0 && s.lastConfig != nil {
-		return s.startKernel(s.lastConfig, s.lastUsers)
-	}
-	return false
-}
-
 // ─── User update entry points ───────────────────────────────────────────────
 
 // applyUserUpdate replaces the full user set and hot-swaps the kernel.
 // Called from WS sync.users and REST polling.
 func (s *Service) applyUserUpdate(ctx context.Context, users []model.UserSpec, newHash string) {
-	if !s.ensureRunning() {
+	if !s.kernel.IsRunning() {
+		prevUsers, prevHash := s.prepareUserState(users)
+		if len(users) > 0 && s.lastConfig != nil && !s.startKernel(s.lastConfig, users) {
+			s.restoreUserState(prevUsers, prevHash)
+		}
 		return
 	}
 
+	s.trackAndEnforce(ctx)
 	prevUsers, prevHash := s.prepareUserState(users)
 	added, removed, err := s.kernel.UpdateUsers(users)
 	if err != nil {
@@ -800,7 +798,8 @@ func (s *Service) applyUserDelta(ctx context.Context, action string, deltaUsers 
 		}
 		merged := mergeUsers(s.lastUsers, deltaUsers)
 
-		if !s.ensureRunning() {
+		if !s.kernel.IsRunning() {
+			s.applyUserUpdate(ctx, merged, "")
 			return
 		}
 
@@ -835,9 +834,11 @@ func (s *Service) applyUserDelta(ctx context.Context, action string, deltaUsers 
 		filtered := subtractUsers(s.lastUsers, deltaUsers)
 
 		if !s.kernel.IsRunning() {
+			s.updateUserState(filtered)
 			return
 		}
 
+		s.trackAndEnforce(ctx)
 		prevUsers, prevHash := s.prepareUserState(filtered)
 		removed, err := s.kernel.RemoveUsers(deltaUsers)
 		if err != nil {
@@ -937,10 +938,6 @@ func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged 
 }
 
 func (s *Service) trackAndEnforce(ctx context.Context) {
-	if !s.kernel.IsRunning() {
-		return
-	}
-
 	traffic, aliveIPs, connCount, err := s.kernel.GetUserTraffic(ctx)
 	if err != nil {
 		nlog.Core().Debug("get user traffic failed", "error", err)
@@ -975,45 +972,69 @@ func (s *Service) pushReportAsync() {
 		return
 	}
 
-	traffic := s.tracker.FlushTraffic()
-	aliveIPs := s.tracker.FlushAliveIPs()
-	online := s.tracker.CurrentOnline()
-	status := monitor.Collect()
-	metrics := s.buildMetrics(status)
-	metrics["kernel_status"] = s.kernel.IsRunning()
+	if s.pendingReport == nil {
+		payload := s.collectReport()
+		s.pendingReport = &payload
+	}
 
+	s.pushWait.Add(1)
 	go func() {
+		defer s.pushWait.Done()
 		defer s.pushActive.Store(false)
-		if err := s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
-			nlog.Core().Warn("failed to push report", "error", err)
-			if len(traffic) > 0 {
-				s.tracker.RestoreTraffic(traffic)
-			}
-			if len(aliveIPs) > 0 {
-				s.tracker.RestoreAliveIPs(aliveIPs)
-			}
+		if err := s.sendPendingReport(); err != nil {
+			nlog.Core().Warn("failed to push report; will retry the same batch", "error", err)
 			s.pushBackoff.onFailure()
 			return
 		}
 		s.pushBackoff.onSuccess()
-		nlog.ReportPushed(len(traffic), len(online))
 	}()
 }
 
-// pushReportSync is used only during shutdown to ensure final data is sent.
-func (s *Service) pushReportSync() {
-	if !s.sink.SupportsReporting() {
-		return
-	}
-	traffic := s.tracker.FlushTraffic()
-	aliveIPs := s.tracker.FlushAliveIPs()
-	online := s.tracker.CurrentOnline()
+// collectReport snapshots pending bytes. Reusing the identifier on retry lets
+// the panel recognize an earlier commit even if the HTTP response was lost.
+func (s *Service) collectReport() controlplane.ReportPayload {
 	status := monitor.Collect()
 	metrics := s.buildMetrics(status)
 	metrics["kernel_status"] = s.kernel.IsRunning()
 
-	if err := s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
-		nlog.Core().Warn("failed to push final report", "error", err)
+	var reportID [16]byte
+	rand.Read(reportID[:])
+	return controlplane.ReportPayload{
+		ID:      fmt.Sprintf("%x", reportID),
+		Traffic: s.tracker.FlushTraffic(), Alive: s.tracker.FlushAliveIPs(), Online: s.tracker.CurrentOnline(),
+		CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed},
+		Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed},
+		Metrics: metrics,
+	}
+}
+
+func (s *Service) sendPendingReport() error {
+	if err := s.sink.Report(*s.pendingReport); err != nil {
+		return err
+	}
+	nlog.ReportPushed(len(s.pendingReport.Traffic), len(s.pendingReport.Online))
+	s.pendingReport = nil
+	return nil
+}
+
+// pushReportSync drains the in-flight batch before sending final counters.
+func (s *Service) pushReportSync() {
+	if !s.sink.SupportsReporting() {
+		return
+	}
+	s.pushWait.Wait()
+	if s.pendingReport != nil {
+		if err := s.sendPendingReport(); err != nil {
+			nlog.Core().Warn("failed to push pending report on shutdown", "error", err)
+			return
+		}
+	}
+	if s.tracker.HasTraffic() {
+		payload := s.collectReport()
+		s.pendingReport = &payload
+		if err := s.sendPendingReport(); err != nil {
+			nlog.Core().Warn("failed to push final report", "error", err)
+		}
 	}
 }
 

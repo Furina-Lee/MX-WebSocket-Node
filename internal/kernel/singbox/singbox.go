@@ -48,7 +48,9 @@ type SingBox struct {
 	// connTracker is our lightweight in-process byte/IP tracker.
 	// Created fresh on every Start (full restart).
 	// Survives Reload (hot-swap) since live connections persist.
-	connTracker *ConnTracker
+	connTracker    *ConnTracker
+	draining       map[*ConnTracker]struct{}
+	retiredTraffic map[int][2]int64
 
 	// speedLimitFunc resolves a user UUID to a *rate.Limiter.
 	// Set once by SetSpeedLimitFunc and forwarded to every new ConnTracker.
@@ -64,7 +66,7 @@ type SingBox struct {
 }
 
 func New(cfg config.KernelConfig) *SingBox {
-	return &SingBox{cfg: cfg}
+	return &SingBox{cfg: cfg, draining: make(map[*ConnTracker]struct{}), retiredTraffic: make(map[int][2]int64)}
 }
 
 var _ kernel.Kernel = (*SingBox)(nil)
@@ -141,7 +143,10 @@ func (s *SingBox) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls 
 
 	// Fresh tracker on full restart.
 	s.connTracker = NewConnTracker(0)
-	s.connTracker.SetUserMap(buildUserMap(users))
+	if oldTracker != nil {
+		s.draining[oldTracker] = struct{}{}
+	}
+	s.updateTrackerUsersLocked(users)
 	if s.speedLimitFunc != nil {
 		s.connTracker.SetSpeedLimitFunc(s.speedLimitFunc)
 	}
@@ -154,7 +159,14 @@ func (s *SingBox) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls 
 
 	// Recycle old instance in background — drain then close.
 	if oldBox != nil {
-		go recycleOldBox(oldBox, oldCancel, oldCtx, oldTracker)
+		go func() {
+			recycleOldBox(oldBox, oldCancel, oldCtx, oldTracker)
+			s.mu.Lock()
+			s.retireTrackerLocked(oldTracker)
+			s.mu.Unlock()
+		}()
+	} else {
+		s.retireTrackerLocked(oldTracker)
 	}
 
 	nlog.Core().Debug("sing-box started", "users", len(users))
@@ -303,9 +315,7 @@ func (s *SingBox) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls
 
 	// Trackers remain registered on the Router (which survives ReloadUsers).
 	// Only update the user map — do NOT re-register or traffic is double-counted.
-	if s.connTracker != nil {
-		s.connTracker.SetUserMap(buildUserMap(users))
-	}
+	s.updateTrackerUsersLocked(users)
 
 	nlog.Core().Debug("sing-box reloaded", "users", len(users))
 	s.users = users
@@ -505,9 +515,7 @@ func (s *SingBox) UpdateUsers(users []model.UserSpec) (added, removed int, err e
 
 	if added == 0 && removed == 0 {
 		// Only limits may have changed — update tracker map.
-		if s.connTracker != nil {
-			s.connTracker.SetUserMap(buildUserMap(users))
-		}
+		s.updateTrackerUsersLocked(users)
 		s.users = users
 		return 0, 0, nil
 	}
@@ -605,22 +613,59 @@ func (s *SingBox) reloadInboundsLocked(users []model.UserSpec) error {
 		}
 	}
 
-	if s.connTracker != nil {
-		s.connTracker.SetUserMap(buildUserMap(users))
-	}
+	s.updateTrackerUsersLocked(users)
 
 	nlog.Core().Debug("sing-box users hot-swapped", "users", len(users))
 	return nil
 }
 
-// ─── Observability ──────────────────────────────────────────────────────────
-func (s *SingBox) GetUserTraffic(_ context.Context) (traffic map[int][2]int64, aliveIPs map[int]map[string]bool, connCount int, err error) {
-	ct := s.connTrackerSafe()
-	if ct == nil {
-		return nil, nil, 0, nil
+// updateTrackerUsersLocked revokes connections in the active kernel and in
+// any previous instances still draining after a restart.
+func (s *SingBox) updateTrackerUsersLocked(users []model.UserSpec) {
+	allowed := buildUserMap(users)
+	if s.connTracker != nil {
+		s.connTracker.SetUserMap(allowed)
 	}
-	traffic, aliveIPs, connCount = ct.GetUserTraffic()
-	return traffic, aliveIPs, connCount, nil
+	for tracker := range s.draining {
+		tracker.SetUserMap(allowed)
+	}
+}
+
+func addTraffic(total, sample map[int][2]int64) {
+	for id, current := range sample {
+		previous := total[id]
+		total[id] = [2]int64{previous[0] + current[0], previous[1] + current[1]}
+	}
+}
+
+func (s *SingBox) retireTrackerLocked(tracker *ConnTracker) {
+	if tracker == nil {
+		return
+	}
+	traffic, _, _ := tracker.GetUserTraffic()
+	addTraffic(s.retiredTraffic, traffic)
+	delete(s.draining, tracker)
+}
+
+// ─── Observability ──────────────────────────────────────────────────────────
+func (s *SingBox) GetUserTraffic(_ context.Context) (map[int][2]int64, map[int]map[string]bool, int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	traffic := make(map[int][2]int64, len(s.retiredTraffic))
+	addTraffic(traffic, s.retiredTraffic)
+	var ips map[int]map[string]bool
+	var connections int
+	if s.connTracker != nil {
+		active, activeIPs, activeCount := s.connTracker.GetUserTraffic()
+		addTraffic(traffic, active)
+		ips, connections = activeIPs, activeCount
+	}
+	for tracker := range s.draining {
+		active, _, _ := tracker.GetUserTraffic()
+		addTraffic(traffic, active)
+	}
+	return traffic, ips, connections, nil
 }
 
 // CloseConnection force-closes a specific connection by its ID.

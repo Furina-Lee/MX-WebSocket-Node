@@ -73,7 +73,7 @@ jobs:
     name: Build & Push Docker Image
     runs-on: ubuntu-latest
     needs: test
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && (github.ref_type == 'tag' || contains(fromJSON('["dev", "main", "master"]'), github.ref_name))
     permissions:
       contents: read
       packages: write

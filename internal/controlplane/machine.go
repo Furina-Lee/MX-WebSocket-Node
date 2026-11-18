@@ -100,7 +100,7 @@ func (p *MachinePanelControlPlane) Poll(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("machine poll config: %w", err)
 	}
-	users, err := p.client.GetUsers()
+	users, err := p.client.GetUsersSnapshot()
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("machine poll users: %w", err)
 	}
@@ -129,7 +129,7 @@ func (p *MachinePanelControlPlane) Report(payload ReportPayload) error {
 	return p.client.Report(
 		payload.Traffic, payload.Alive, payload.Online,
 		payload.CPU, payload.Mem, payload.Swap, payload.Disk,
-		payload.Metrics,
+		payload.Metrics, payload.ID,
 	)
 }
 

@@ -8,9 +8,11 @@ import (
 
 	"github.com/cedar2025/xboard-node/internal/cert"
 	"github.com/cedar2025/xboard-node/internal/config"
+	"github.com/cedar2025/xboard-node/internal/controlplane"
 	"github.com/cedar2025/xboard-node/internal/kernel"
 	"github.com/cedar2025/xboard-node/internal/limiter"
 	"github.com/cedar2025/xboard-node/internal/model"
+	"github.com/cedar2025/xboard-node/internal/tracker"
 	"golang.org/x/time/rate"
 )
 
@@ -34,8 +36,8 @@ type fakeKernel struct {
 	deviceLimitFunc func(string) (int, bool)
 }
 
-func (f *fakeKernel) Name() string { return "fake" }
-func (f *fakeKernel) Protocols() []string { return []string{"vless"} }
+func (f *fakeKernel) Name() string                      { return "fake" }
+func (f *fakeKernel) Protocols() []string               { return []string{"vless"} }
 func (f *fakeKernel) Capabilities() kernel.Capabilities { return kernel.Capabilities{} }
 func (f *fakeKernel) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls kernel.TLSCert) error {
 	_, _, _ = nodeConfig, users, tls
@@ -46,7 +48,7 @@ func (f *fakeKernel) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, t
 	f.running = true
 	return nil
 }
-func (f *fakeKernel) Stop() { f.running = false }
+func (f *fakeKernel) Stop()           { f.running = false }
 func (f *fakeKernel) IsRunning() bool { return f.running }
 func (f *fakeKernel) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls kernel.TLSCert) error {
 	_, _, _ = nodeConfig, users, tls
@@ -92,14 +94,15 @@ func (f *fakeKernel) CloseUserConnections(ctx context.Context, uuid string) erro
 	return nil
 }
 func (f *fakeKernel) SetSpeedLimitFunc(fn func(uuid string) *rate.Limiter) { f.speedLimitFunc = fn }
-func (f *fakeKernel) SetDeviceLimitFunc(fn func(uuid string) (int, bool)) { f.deviceLimitFunc = fn }
-func (f *fakeKernel) UpdateGlobalDevices(users map[int][]string) { _ = users }
-func (f *fakeKernel) ClearGlobalDevices() {}
+func (f *fakeKernel) SetDeviceLimitFunc(fn func(uuid string) (int, bool))  { f.deviceLimitFunc = fn }
+func (f *fakeKernel) UpdateGlobalDevices(users map[int][]string)           { _ = users }
+func (f *fakeKernel) ClearGlobalDevices()                                  {}
 
 func newTestService(k *fakeKernel) *Service {
 	sharedLimiter := limiter.New()
 	s := &Service{
 		kernel:       k,
+		tracker:      tracker.New(),
 		limiter:      sharedLimiter,
 		speedTracker: limiter.NewSpeedTracker(sharedLimiter),
 		cert:         cert.NewManager(config.CertConfig{}),
@@ -198,7 +201,6 @@ func TestApplyUserDeltaAddPreparesLimiterBeforeKernelUpdate(t *testing.T) {
 	}
 }
 
-
 func TestValidateNodeRuntimeRejectsUnsupportedDNSProvider(t *testing.T) {
 	cfg := &config.Config{Kernel: config.KernelConfig{Type: "singbox"}}
 	err := validateNodeRuntime(cfg, []string{"http"}, &model.NodeSpec{
@@ -294,5 +296,48 @@ func TestValidateNodeRuntimeRejectsRealityWithoutServerNameOrDest(t *testing.T) 
 	}
 	if got := err.Error(); got != "reality tls requires tls_settings.server_name or tls_settings.dest" {
 		t.Fatalf("unexpected error: %v", got)
+	}
+}
+
+type ambiguousReportSink struct {
+	controlplane.Sink
+	reports []controlplane.ReportPayload
+}
+
+func (s *ambiguousReportSink) Report(report controlplane.ReportPayload) error {
+	s.reports = append(s.reports, report)
+	if len(s.reports) == 1 {
+		return errors.New("response lost")
+	}
+	return nil
+}
+
+func TestTrafficReportRetryKeepsIDAndTraffic(t *testing.T) {
+	sink := &ambiguousReportSink{}
+	s := &Service{sink: sink, pendingReport: &controlplane.ReportPayload{
+		ID:      "2fed0e015f3242c4a19224203e88d4b0",
+		Traffic: map[int][2]int64{1: {3, 4}},
+	}}
+	if s.sendPendingReport() == nil || s.pendingReport == nil {
+		t.Fatal("failed report should remain pending")
+	}
+	if err := s.sendPendingReport(); err != nil || s.pendingReport != nil {
+		t.Fatalf("successful retry should clear the report, err = %v", err)
+	}
+	a, b := sink.reports[0], sink.reports[1]
+	if a.ID != b.ID || a.Traffic[1] != b.Traffic[1] {
+		t.Fatalf("retry changed report: %v vs %v", a, b)
+	}
+}
+
+func TestPullCannotRestoreUserRemovedByNewerPush(t *testing.T) {
+	s := newTestService(&fakeKernel{running: true})
+	users := []model.UserSpec{{ID: 1, UUID: "user"}}
+	s.updateUserState(users)
+	stale := pullResult{users: users, userHash: computeUserHash(users), userRevision: s.userRevision}
+	s.applyUserDelta(context.Background(), "remove", users)
+	s.applyPullResult(context.Background(), stale)
+	if len(s.lastUsers) != 0 {
+		t.Fatal("obsolete REST result restored a removed user")
 	}
 }
