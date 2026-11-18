@@ -4,7 +4,7 @@
 
 services:
   xboard-node:
-    image: ${XBOARD_NODE_IMAGE:-ghcr.io/furina-lee/xboard-node:v1.13-furina.3}
+    image: ${XBOARD_NODE_IMAGE:-ghcr.io/furina-lee/xboard-node:v1.13-furina.5}
     container_name: xboard-node
     network_mode: host
     restart: unless-stopped
