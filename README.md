@@ -9,6 +9,16 @@ cd xboard-node
 docker compose up -d
 ```
 
+For machine mode, set the panel URL and add this to `config/config.yml` with the SID and token from Xboard's machine management page:
+
+```yaml
+machine:
+  machine_id: 1
+  token: "your-machine-token"
+```
+
+For an environment-based setup, provide `API_HOST`, `MACHINE_ID`, and `MACHINE_TOKEN` to the container.
+
 ## Update / logs / stop
 
 ```bash
