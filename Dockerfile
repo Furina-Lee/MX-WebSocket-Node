@@ -39,6 +39,8 @@ WORKDIR /etc/xboard-node
 #   apiHost  / API_HOST    → panel URL
 #   apiKey   / API_KEY     → server token
 #   nodeID   / NODE_ID     → node ID
+#   MACHINE_ID           → machine SID in machine mode
+#   MACHINE_TOKEN        → machine token in machine mode
 #   nodeType / NODE_TYPE   → node type (optional)
 #   kernel   / KERNEL_TYPE → singbox (default) or xray
 #   domain   / DOMAIN      → TLS domain (enables auto_tls)

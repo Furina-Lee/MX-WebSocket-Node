@@ -22,7 +22,7 @@ docker run -d --restart=always --network=host \
   ghcr.io/furina-lee/xboard-node:latest
 ```
 
-For machine mode, set `MACHINE_ID` instead of `nodeID`, and use the machine token as `apiKey`. The image supports Linux AMD64 and ARM64.
+For machine mode, set `MACHINE_ID` instead of `nodeID`, and pass the machine token as `MACHINE_TOKEN`. The image supports Linux AMD64 and ARM64.
 
 ### Docker Compose
 
