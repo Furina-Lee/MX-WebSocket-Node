@@ -21,9 +21,9 @@ import (
 
 // nodeHandle tracks a running node service.
 type nodeHandle struct {
-	cancel  context.CancelFunc
-	done    chan struct{}
-	mailbox *controlplane.NodeMailbox
+	cancel   context.CancelFunc
+	done     chan struct{}
+	nodeType string
 }
 
 // Orchestrator manages all nodes bound to a panel machine. It:
@@ -35,8 +35,9 @@ type Orchestrator struct {
 	cfg    *config.Config
 	client *panel.Client // machine-level client (no node_id)
 
-	mu    sync.Mutex
-	nodes map[int]*nodeHandle // node_id → handle
+	// The Run loop owns node lifecycles and serializes discovery with shutdown.
+	nodes     map[int]*nodeHandle
+	discovery chan struct{}
 
 	// Per-node mailbox keyed by node_id. Shared WS events are aggregated here
 	// and each node service drains the latest state when ready.
@@ -47,10 +48,6 @@ type Orchestrator struct {
 	// Shared WS client (nil when WS is disabled).
 	ws       *panel.WSClient
 	wsCancel context.CancelFunc
-
-	// runCtx is stored from Run() so that onWSEvent can trigger rediscover
-	// for sync.nodes events without blocking the main loop.
-	runCtx context.Context
 
 	pullInterval time.Duration
 	pushInterval time.Duration
@@ -67,6 +64,7 @@ func New(cfg *config.Config) *Orchestrator {
 		cfg:       cfg,
 		client:    panel.NewClient(panelCfg),
 		nodes:     make(map[int]*nodeHandle),
+		discovery: make(chan struct{}, 1),
 		mailboxes: make(map[int]*controlplane.NodeMailbox),
 		statuses:  make(map[int]chan<- controlplane.StatusChange),
 	}
@@ -74,7 +72,6 @@ func New(cfg *config.Config) *Orchestrator {
 
 // Run is the main loop. It blocks until ctx is cancelled.
 func (o *Orchestrator) Run(ctx context.Context) error {
-	o.runCtx = ctx
 	nodesResp, err := o.client.GetMachineNodes()
 	if err != nil {
 		return fmt.Errorf("initial node discovery: %w", err)
@@ -107,6 +104,9 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		case <-discoveryTicker.C:
 			o.rediscover(ctx)
 
+		case <-o.discovery:
+			o.rediscover(ctx)
+
 		case <-statusTicker.C:
 			o.reportMachineStatus()
 		}
@@ -116,17 +116,14 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 // ─── Node lifecycle ──────────────────────────────────────────────────────
 
 func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
-	o.mu.Lock()
-	if _, exists := o.nodes[mn.ID]; exists {
-		o.mu.Unlock()
+	if _, exists := o.nodes[mn.ID]; exists || ctx.Err() != nil {
 		return
 	}
 
 	nodeCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	mb := controlplane.NewNodeMailbox()
-	o.nodes[mn.ID] = &nodeHandle{cancel: cancel, done: done, mailbox: mb}
-	o.mu.Unlock()
+	o.nodes[mn.ID] = &nodeHandle{cancel: cancel, done: done, nodeType: mn.Type}
 
 	nodeCfg := o.cfg.ExpandMachineNode(mn.ID, mn.Type)
 	perNodeClient := o.client.ForNode(mn.ID)
@@ -190,14 +187,8 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 }
 
 func (o *Orchestrator) stopNode(nodeID int) {
-	o.mu.Lock()
-	h, ok := o.nodes[nodeID]
-	if !ok {
-		o.mu.Unlock()
-		return
-	}
+	h := o.nodes[nodeID]
 	delete(o.nodes, nodeID)
-	o.mu.Unlock()
 
 	o.eventsMu.Lock()
 	delete(o.mailboxes, nodeID)
@@ -209,18 +200,11 @@ func (o *Orchestrator) stopNode(nodeID int) {
 }
 
 func (o *Orchestrator) stopAll() {
-	o.mu.Lock()
-	handles := make(map[int]*nodeHandle, len(o.nodes))
 	for id, h := range o.nodes {
-		handles[id] = h
-	}
-	o.mu.Unlock()
-
-	for id, h := range handles {
 		nlog.Core().Info(fmt.Sprintf("machine: stopping node %d", id))
 		h.cancel()
 	}
-	for _, h := range handles {
+	for _, h := range o.nodes {
 		<-h.done
 	}
 
@@ -243,16 +227,15 @@ func (o *Orchestrator) rediscover(ctx context.Context) {
 		wanted[n.ID] = n
 	}
 
-	o.mu.Lock()
-	var toRemove []int
-	for id := range o.nodes {
-		if _, ok := wanted[id]; !ok {
-			toRemove = append(toRemove, id)
+	for id, running := range o.nodes {
+		node, exists := wanted[id]
+		if exists && node.Type == running.nodeType {
+			continue
 		}
-	}
-	o.mu.Unlock()
-
-	for _, id := range toRemove {
+		if exists {
+			nlog.Core().Info("machine node protocol changed",
+				"node_id", id, "from", running.nodeType, "to", node.Type)
+		}
 		o.stopNode(id)
 	}
 
@@ -320,7 +303,10 @@ func (o *Orchestrator) onWSEvent(event panel.WSEvent) {
 	// sync.nodes is a machine-level event, not per-node
 	if event.Type == panel.WSEventSyncNodes {
 		nlog.Core().Info("machine received sync.nodes, triggering immediate rediscovery")
-		go o.rediscover(o.runCtx)
+		select {
+		case o.discovery <- struct{}{}:
+		default: // A pending discovery will read the latest snapshot.
+		}
 		return
 	}
 
