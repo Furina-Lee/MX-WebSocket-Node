@@ -99,7 +99,7 @@ files=(mx_node.py machine.py config.example.json requirements.txt node_config.de
 if [[ -z "$source_dir" || ! -f "$source_dir/machine.py" ]]; then
   command -v curl >/dev/null || fail '远程安装需要 curl。'
   source_dir=$scratch
-  repo="https://raw.githubusercontent.com/Furina-Lee/Xboard-Node/$version"
+  repo="https://raw.githubusercontent.com/Furina-Lee/MX-WebSocket-Node/$version"
   for file in "${files[@]}"; do
     curl -fsSL --proto '=https' --proto-redir '=https' --retry 2 -- "$repo/$file" >"$scratch/$file"
   done
