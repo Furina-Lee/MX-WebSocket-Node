@@ -178,9 +178,15 @@ install -m 0755 -- "$binary" "$install_dir/proxy-node"
 for file in mx_node.py machine.py requirements.txt node_config.defaults.json; do
   install -m 0644 -- "$source_dir/$file" "$install_dir/"
 done
-python3 -m venv "$install_dir/.venv" ||
-  fail "无法创建 Python 虚拟环境。请确认此 Python 的 venv 和 ensurepip 可用后重新运行。"
-"$install_dir/.venv/bin/pip" install -r "$install_dir/requirements.txt"
+(
+  # The environment contains code and dependencies, and the service runs as mxnode.
+  umask 022
+  python3 -m venv "$install_dir/.venv" ||
+    fail "无法创建 Python 虚拟环境。请确认此 Python 的 venv 和 ensurepip 可用后重新运行。"
+  "$install_dir/.venv/bin/pip" install -r "$install_dir/requirements.txt"
+)
+# Repair directories left by an earlier installation using a restrictive umask.
+chmod -R go+rX -- "$install_dir/.venv"
 install -m 0644 "$source_dir/mx-websocket-node.service" /etc/systemd/system/
 install -m 0640 -o root -g mxnode "$scratch/config.json" "$config_file"
 systemctl daemon-reload
