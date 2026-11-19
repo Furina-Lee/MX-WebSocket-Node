@@ -2,6 +2,12 @@
 
 适用于继续运行旧版 Xboard-Node 容器的 Linux AMD64 和 ARM64 主机。下文使用的旧版 GHCR 镜像已包含 MX 进程。若要从 Xboard「服务器管理」安装新版独立节点，请参阅 [MX WebSocket 节点安装说明](https://github.com/Furina-Lee/MX-WebSocket-Node/blob/dev/README.md)。
 
+## 使用前确认
+
+- 本页的 Compose 文件适用于旧版 Xboard-Node 容器，使用主机网络，原端口需可用。
+- 节点机需要 Docker Engine 和 Docker Compose。已有部署建议备份 `config/config.yml` 及挂载数据。
+- 若准备迁移到新版独立节点，请先从面板生成新版机器安装命令，再安排停用旧容器和释放端口。新版步骤见 [节点部署方式](https://github.com/Furina-Lee/MX-WebSocket-Node/blob/dev/README.md#选择部署方式)。
+
 ## 首次安装
 
 ```bash
