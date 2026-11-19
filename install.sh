@@ -160,6 +160,17 @@ with pathlib.Path(output).open("x", encoding="utf-8") as config:
 ' "$source_dir/config.example.json" "$scratch/config.json" "$panel_url" "$config_id" "$mode"
 unset api_key
 
+# Debian and Ubuntu package ensurepip separately from the Python interpreter.
+if ! python3 -c "import ensurepip" >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null && [[ /usr/bin/python3 -ef $(command -v python3) ]]; then
+    echo "正在安装 Python 虚拟环境依赖（python3-venv）..."
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv
+  fi
+  python3 -c "import ensurepip" >/dev/null 2>&1 ||
+    fail "当前 Python 缺少 ensurepip。请安装与 python3 对应的 venv 软件包，再运行安装命令。"
+fi
+
 getent passwd mxnode >/dev/null || useradd --system --user-group --no-create-home --shell /usr/sbin/nologin mxnode
 install -d -m 0755 "$install_dir"
 install -d -m 0750 -o root -g mxnode "$config_dir"
@@ -167,7 +178,8 @@ install -m 0755 -- "$binary" "$install_dir/proxy-node"
 for file in mx_node.py machine.py requirements.txt node_config.defaults.json; do
   install -m 0644 -- "$source_dir/$file" "$install_dir/"
 done
-python3 -m venv "$install_dir/.venv"
+python3 -m venv "$install_dir/.venv" ||
+  fail "无法创建 Python 虚拟环境。请确认此 Python 的 venv 和 ensurepip 可用后重新运行。"
 "$install_dir/.venv/bin/pip" install -r "$install_dir/requirements.txt"
 install -m 0644 "$source_dir/mx-websocket-node.service" /etc/systemd/system/
 install -m 0640 -o root -g mxnode "$scratch/config.json" "$config_file"

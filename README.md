@@ -15,7 +15,7 @@ A、B 使用同一个安装脚本和 systemd 服务。安装器每台主机只�
 ## 安装前检查
 
 - **面板**使用已集成流量回执支持的 [Furina-Lee/Xboard 镜像](https://github.com/Furina-Lee/Xboard#docker-镜像)，确认已执行 `node_traffic_reports` 数据库迁移。启用面板 WebSocket，反向代理应支持 `/ws` 升级。自编译旧版面板时，可先检查并应用 [面板补丁](xboard-panel.patch)，再重建面板并重启 WebSocket worker。补丁基于 Xboard 提交 `64b5e15`。
-- **节点机**需要 Linux、systemd、Python 3.10+、`venv` 和 curl。安装时需要 root，并能访问面板 HTTPS、GitHub Raw 和 Python 依赖源。
+- **节点机**需要 Linux、systemd、Python 3.10+、`venv` 和 curl。安装时需要 root，并能访问面板 HTTPS、GitHub Raw 和 Python 依赖源。Debian/Ubuntu 使用系统 Python 且缺少 `ensurepip` 时，脚本会通过 apt 安装 `python3-venv`；其他环境请预先安装对应的 venv 依赖。
 - **原版二进制**需自行准备。运行 `uname -m`，`x86_64` 选 amd64，`aarch64` 选 arm64。从对应原版压缩包解压出 `proxy-node`。安装器会检查 ELF 架构，并依次查找当前目录的 `proxy-node`、`/opt/proxy-node/proxy-node`、`/usr/local/bin/mx-proxy-node`、`/usr/local/bin/proxy-node`。也可以用 `--binary /绝对路径/proxy-node` 指定文件。
 - **迁移**先备份旧配置，确认绑定端口及维护窗口。若旧 `xboard-node.service` 或 `proxy-node.service` 仍在运行，安装器会退出。停用旧服务会影响它管理的节点。已有本服务配置时，安装器会退出并保留配置。
 
