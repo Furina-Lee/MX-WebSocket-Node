@@ -1,11 +1,11 @@
-# Xboard-Node Docker Compose
+# 旧版 Xboard-Node Docker Compose
 
-适用于 Linux AMD64 和 ARM64。Docker 镜像已经包含 MX 进程。完整的 systemd、手动二进制和源码安装方法见 [Xboard-Node 中文 README](https://github.com/Furina-Lee/Xboard-Node/blob/dev/README.md)。
+适用于继续运行旧版 Xboard-Node 容器的 Linux AMD64 和 ARM64 主机。下文使用的旧版 GHCR 镜像已包含 MX 进程。若要从 Xboard「服务器管理」安装新版独立节点，请参阅 [MX WebSocket 节点安装说明](https://github.com/Furina-Lee/MX-WebSocket-Node/blob/dev/README.md)。
 
 ## 首次安装
 
 ```bash
-git clone -b compose --depth 1 https://github.com/Furina-Lee/Xboard-Node.git xboard-node
+git clone -b compose --depth 1 https://github.com/Furina-Lee/MX-WebSocket-Node.git xboard-node
 cd xboard-node
 # 编辑 config/config.yml，再启动
 docker compose up -d
