@@ -1,0 +1,25 @@
+[Unit]
+Description=Standalone MX node with Xboard WebSocket
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=mxnode
+Group=mxnode
+StateDirectory=mx-websocket-node
+StateDirectoryMode=0700
+UMask=0077
+WorkingDirectory=/opt/mx-websocket-node
+ExecStart=/opt/mx-websocket-node/.venv/bin/python /opt/mx-websocket-node/mx_node.py /etc/mx-websocket-node/config.json
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
