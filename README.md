@@ -40,7 +40,7 @@ docker compose logs --tail=100 xboard-node
 先更新面板并确认 `node_traffic_reports` 数据库迁移已执行。进入节点原有的 Compose 目录，保留 `config/config.yml` 和已有挂载，再在项目的 `.env` 中设置：
 
 ```dotenv
-XBOARD_NODE_IMAGE=ghcr.io/furina-lee/xboard-node:v1.13-furina.6
+XBOARD_NODE_IMAGE=ghcr.io/furina-lee/xboard-node:v1.13-furina.7
 ```
 
 如果旧 Compose 文件直接写了 `image:`，把该行改成同一个镜像。执行：
