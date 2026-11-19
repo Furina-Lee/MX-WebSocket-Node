@@ -15,7 +15,16 @@ import (
 )
 
 func TestRediscoverReplacesNodeWhenProtocolChanges(t *testing.T) {
-	updated := panel.MachineNode{ID: 7, Type: "mx"}
+	for _, pair := range [][2]string{{"vless", "mx"}, {"mx", "vless"}, {"vless", "trojan"}} {
+		t.Run(pair[0]+"_to_"+pair[1], func(t *testing.T) {
+			testRediscoverProtocolChange(t, pair[0], pair[1])
+		})
+	}
+}
+
+func testRediscoverProtocolChange(t *testing.T, from, to string) {
+	t.Helper()
+	updated := panel.MachineNode{ID: 7, Type: to}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/api/v2/server/machine/nodes" {
 			http.NotFound(w, r)
@@ -49,7 +58,7 @@ func TestRediscoverReplacesNodeWhenProtocolChanges(t *testing.T) {
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 	oldCtx, cancelOld := context.WithCancel(ctx)
-	old := &nodeHandle{cancel: cancelOld, done: make(chan struct{}), nodeType: "vless"}
+	old := &nodeHandle{cancel: cancelOld, done: make(chan struct{}), nodeType: from}
 	o.nodes[updated.ID] = old
 	go func() {
 		<-oldCtx.Done()
@@ -60,13 +69,13 @@ func TestRediscoverReplacesNodeWhenProtocolChanges(t *testing.T) {
 
 	o.rediscover(ctx)
 	current := o.nodes[updated.ID]
-	if current == nil || current == old || current.nodeType != "mx" {
-		t.Fatalf("expected the same node ID to run MX, got %+v", current)
+	if current == nil || current == old || current.nodeType != to {
+		t.Fatalf("expected the same node ID to run %s, got %+v", to, current)
 	}
 	select {
 	case <-old.done:
 	default:
-		t.Fatal("MX was scheduled before the old service finished stopping")
+		t.Fatal("replacement was scheduled before the old service finished stopping")
 	}
 	rebound, err := net.Listen("tcp", addr)
 	if err != nil {
