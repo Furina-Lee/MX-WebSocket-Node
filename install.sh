@@ -96,6 +96,9 @@ if [[ -n ${BASH_SOURCE[0]:-} && -f ${BASH_SOURCE[0]} && $version == dev ]]; then
   source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 fi
 files=(mx_node.py machine.py config.example.json requirements.txt node_config.defaults.json mx-websocket-node.service)
+if [[ "$mode" == machine ]]; then
+  command -v curl >/dev/null || fail "机器模式需要 curl。"
+fi
 if [[ -z "$source_dir" || ! -f "$source_dir/machine.py" ]]; then
   command -v curl >/dev/null || fail '远程安装需要 curl。'
   source_dir=$scratch
@@ -106,7 +109,7 @@ if [[ -z "$source_dir" || ! -f "$source_dir/machine.py" ]]; then
 fi
 
 printf '%s' "$api_key" | python3 -c '
-import json, pathlib, sys, urllib.error, urllib.request
+import json, pathlib, subprocess, sys
 from urllib.parse import urlsplit
 template, output, url, node_id, mode = sys.argv[1:]
 parsed = urlsplit(url)
@@ -120,21 +123,32 @@ data = json.loads(pathlib.Path(template).read_text(encoding="utf-8"))
 url, key = url.rstrip("/"), sys.stdin.read()
 data["panel"].update(api_host=url, api_key=key)
 if mode == "machine":
-    class NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):
-            return None
-
-    request = urllib.request.Request(url + "/api/v2/server/machine/nodes",
-        data=json.dumps({"machine_id": int(node_id), "token": key}).encode(),
-        headers={"Content-Type": "application/json", "Accept": "application/json"})
+    payload = json.dumps({"machine_id": int(node_id), "token": key}).encode()
+    result = subprocess.run(
+        ["curl", "--silent", "--proto", "=https", "--connect-timeout", "8",
+         "--max-time", "15", "--header", "Content-Type: application/json",
+         "--header", "Accept: application/json", "--user-agent", "MX-WebSocket-Node/1.0",
+         "--data-binary", "@-", "--write-out", "\n%{http_code}",
+         "--", url + "/api/v2/server/machine/nodes"],
+        input=payload, stdout=subprocess.PIPE, check=False,
+    )
+    if result.returncode:
+        sys.exit(f"无法访问面板 HTTPS 接口（curl 退出码 {result.returncode}）。")
+    body, _, status = result.stdout.rpartition(b"\n")
+    if status != b"200":
+        code = status.decode("ascii", errors="replace")
+        if status in (b"401", b"403"):
+            sys.exit(f"机器发现接口返回 HTTP {code}。请核对机器 ID、Token、启用状态及面板访问规则。")
+        sys.exit(f"机器发现接口返回 HTTP {code}。请检查面板地址及反向代理。")
     try:
-        with urllib.request.build_opener(NoRedirect).open(request, timeout=15) as response:
-            nodes = json.load(response)["nodes"]
-            if not isinstance(nodes, list):
-                raise ValueError()
-            print(f"机器认证通过，当前有 {len(nodes)} 个已启用的节点。")
-    except (OSError, KeyError, ValueError):
-        sys.exit("机器认证或节点发现失败，请检查面板 HTTPS 地址、机器 ID 和机器 Token。")
+        nodes = json.loads(body)["nodes"]
+        if not isinstance(nodes, list):
+            raise ValueError()
+    except (ValueError, KeyError, TypeError):
+        sys.exit("面板响应没有有效的节点列表。请检查面板版本和 API 路由。")
+    print(f"机器认证通过，当前有 {len(nodes)} 个已启用的节点。")
+    if not nodes:
+        print("请在面板绑定并启用节点。服务启动后会自动发现它们。")
     data["machine"] = {"id": int(node_id)}
     data["panel"].pop("node_id", None)
     data["panel"].pop("node_type", None)

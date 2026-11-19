@@ -35,6 +35,7 @@ class Machine:
         async with self.session.post(self.base + "/api/v2/server/machine/nodes",
                                      json=self.auth, allow_redirects=False) as response:
             if response.status != 200:
+                LOG.warning("Machine discovery returned HTTP %s", response.status)
                 if response.status in (401, 403):
                     await self.reconcile({})
                 raise RuntimeError(f"machine discovery HTTP {response.status}")
@@ -217,6 +218,7 @@ class Machine:
 async def run_machine(path, config):
     trace = TraceConfig()
     trace.on_request_redirect.append(reject_redirect)
-    async with ClientSession(timeout=ClientTimeout(total=15), trace_configs=[trace]) as session:
+    async with ClientSession(timeout=ClientTimeout(total=15), trace_configs=[trace],
+                             headers={"User-Agent": "MX-WebSocket-Node/1.0"}) as session:
         await Machine(path, config, session).run()
 

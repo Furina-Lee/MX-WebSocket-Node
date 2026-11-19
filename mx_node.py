@@ -273,7 +273,8 @@ async def run(path, config=None, bridges=None, snapshots=None):
         raise ValueError("bridge.binary must point to an executable proxy-node")
     trace = TraceConfig()
     trace.on_request_redirect.append(reject_redirect)
-    async with ClientSession(timeout=ClientTimeout(total=15), trace_configs=[trace]) as session:
+    async with ClientSession(timeout=ClientTimeout(total=15), trace_configs=[trace],
+                             headers={"User-Agent": "MX-WebSocket-Node/1.0"}) as session:
         bridge = Bridge(config, session, state_dir)
         app = web.Application(client_max_size=MAX_REPORT)
         for prefix in ("/api/v1/server/UniProxy/", "/api/v2/server/"):
