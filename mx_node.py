@@ -56,9 +56,14 @@ class Bridge:
         self.node_type = self.panel["node_type"]
         self.credentials = dict(token=self.panel["api_key"], node_id=self.node_id,
                                 node_type=self.node_type)
+        if machine_id := self.options.get("machine_id"):
+            self.credentials["machine_id"] = str(machine_id)
+        self.api_prefix = ("/api/v2/server/" if machine_id
+                           else "/api/v1/server/UniProxy/")
         self.local_token = secrets.token_hex(32)
         self.snapshot = None
         self.changed = asyncio.Event()
+        self.closed = False
         self.queue = sqlite3.connect(state_dir / f"traffic-{self.node_id}.sqlite3")
         self.queue.execute("PRAGMA synchronous=FULL")
         self.queue.execute("""CREATE TABLE IF NOT EXISTS outbox (
@@ -131,7 +136,7 @@ class Bridge:
             headers["If-None-Match"] = etag
         try:
             async with self.session.request(
-                request.method, self.base + "/api/v1/server/UniProxy/" + endpoint,
+                request.method, self.base + self.api_prefix + endpoint,
                 params=self.credentials, json=data, headers=headers, allow_redirects=False,
             ) as response:
                 if response.status not in (200, 304):
@@ -159,7 +164,7 @@ class Bridge:
                 and type(data.get("server_port")) is int and 1 <= data["server_port"] <= 65535)
 
     async def send_reports(self, socket, acknowledgements):
-        while True:
+        while not self.closed:
             row = self.queue.execute(
                 "SELECT report_id, body FROM outbox ORDER BY seq LIMIT 1").fetchone()
             if row is None:
@@ -167,15 +172,18 @@ class Bridge:
                 await self.changed.wait()
                 continue
             report_id, body = row
-            await socket.send_json({"event": "report.traffic", "data": {
-                "report_id": report_id, "traffic": json.loads(body),
-            }})
+            data = {"report_id": report_id, "traffic": json.loads(body)}
+            if self.options.get("machine_id"):
+                data["node_id"] = int(self.node_id)
+            await socket.send_json({"event": "report.traffic", "data": data})
             while True:
                 ack = await asyncio.wait_for(acknowledgements.get(), timeout=20)
                 if ack.get("report_id") == report_id:
                     if ack.get("accepted") is not True:
                         raise RuntimeError("panel declined traffic")
                     break
+            if self.closed:
+                return
             with self.queue:
                 self.queue.execute("DELETE FROM outbox WHERE report_id=?", (report_id,))
 
@@ -255,8 +263,9 @@ async def reject_redirect(session, context, params):
     raise ClientError("panel redirects are disabled")
 
 
-async def run(path):
-    config = load_config(path)
+async def run(path, config=None, bridges=None, snapshots=None):
+    if config is None:
+        config = load_config(path)
     state_dir = Path(config.get("bridge", {}).get("state_dir", path.parent / "state")).resolve()
     state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     executable = Path(config.get("bridge", {}).get("binary", path.parent / "proxy-node")).resolve()
@@ -284,7 +293,14 @@ async def run(path):
             temp = state_dir / "worker.json.tmp"
             temp.write_text(json.dumps(worker_config), encoding="utf-8")
             temp.replace(config_file)
-            ws_task = asyncio.create_task(bridge.websocket())
+            if bridges is None:
+                ws_task = asyncio.create_task(bridge.websocket())
+            else:
+                node_id = int(bridge.node_id)
+                bridges[node_id] = bridge
+                snapshot = snapshots.get(node_id)
+                if bridge.valid_config(snapshot):
+                    bridge.snapshot = snapshot
             env = {key: os.environ[key] for key in ("PATH", "TZ", "LANG") if key in os.environ}
             env["HOME"] = str(state_dir)
             worker = await asyncio.create_subprocess_exec(
@@ -303,7 +319,11 @@ async def run(path):
             if ws_task is not None:
                 ws_task.cancel()
                 await asyncio.gather(ws_task, return_exceptions=True)
+            if bridges is not None:
+                bridges.pop(int(bridge.node_id), None)
             await runner.cleanup()
+            bridge.closed = True
+            bridge.changed.set()
             bridge.queue.close()
             config_file.unlink(missing_ok=True)
 
@@ -311,7 +331,12 @@ async def run(path):
 async def main():
     task = asyncio.current_task()
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
-    return await run(Path(sys.argv[1]).resolve())
+    path = Path(sys.argv[1]).resolve()
+    config = json.loads(path.read_text(encoding="utf-8-sig"))
+    if config.get("machine"):
+        from machine import run_machine
+        return await run_machine(path, config)
+    return await run(path)
 
 
 if __name__ == "__main__":

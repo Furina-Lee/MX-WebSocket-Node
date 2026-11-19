@@ -1,5 +1,5 @@
 diff --git a/app/WebSocket/NodeEventHandlers.php b/app/WebSocket/NodeEventHandlers.php
-index 7dd4ae9..6cbece0 100644
+index 7dd4ae9..0b835c7 100644
 --- a/app/WebSocket/NodeEventHandlers.php
 +++ b/app/WebSocket/NodeEventHandlers.php
 @@ -21,6 +21,38 @@ class NodeEventHandlers
@@ -19,7 +19,7 @@ index 7dd4ae9..6cbece0 100644
 +        if (!$node) {
 +            $conn->send(json_encode([
 +                'event' => 'report.traffic.ack',
-+                'data' => ['report_id' => $reportId, 'accepted' => false],
++                'data' => ['node_id' => $nodeId, 'report_id' => $reportId, 'accepted' => false],
 +            ]));
 +            return;
 +        }
@@ -34,7 +34,7 @@ index 7dd4ae9..6cbece0 100644
 +
 +        $conn->send(json_encode([
 +            'event' => 'report.traffic.ack',
-+            'data' => ['report_id' => $reportId, 'accepted' => true],
++            'data' => ['node_id' => $nodeId, 'report_id' => $reportId, 'accepted' => true],
 +        ]));
 +    }
 +
@@ -42,7 +42,7 @@ index 7dd4ae9..6cbece0 100644
       * Handle node status update
       */
 diff --git a/app/WebSocket/NodeWorker.php b/app/WebSocket/NodeWorker.php
-index 35d646d..7836792 100644
+index 35d646d..7f57ec9 100644
 --- a/app/WebSocket/NodeWorker.php
 +++ b/app/WebSocket/NodeWorker.php
 @@ -27,6 +27,7 @@ class NodeWorker
@@ -62,3 +62,11 @@ index 35d646d..7836792 100644
          ]));
  
          NodeEventHandlers::pushFullSync($conn, $node);
+@@ -251,6 +252,7 @@ class NodeWorker
+             'data' => [
+                 'machine_id' => $machineId,
+                 'node_ids' => $nodeIds,
++                'traffic_report_ack' => true,
+             ],
+         ]));
+ 
