@@ -14,7 +14,7 @@ A、B 使用同一个安装脚本和 systemd 服务。安装器每台主机只�
 
 ## 安装前检查
 
-- **面板**使用已集成流量回执支持的 [Furina-Lee/Xboard 镜像](https://github.com/Furina-Lee/Xboard#docker-镜像)，确认已执行 `node_traffic_reports` 数据库迁移。启用面板 WebSocket，反向代理应支持 `/ws` 升级。自编译旧版面板时，可先检查并应用 [面板补丁](xboard-panel.patch)，再重建面板并重启 WebSocket worker。补丁基于 Xboard 提交 `64b5e15`。
+- **面板**使用已集成流量回执支持的 [Furina-Lee/Xboard 镜像](https://github.com/Furina-Lee/Xboard#docker-镜像)，确认已执行 `node_traffic_reports` 数据库迁移。WebSocket 为可选实时通道。启用时，反代应支持 `/ws` 升级；只用 HTTPS 时，节点也能同步配置并上报流量，无需对公网开放 `8076`。自编译旧版面板时，可先检查并应用 [面板补丁](xboard-panel.patch)，再重建面板并重启 WebSocket worker。补丁基于 Xboard 提交 `64b5e15`。
 - **节点机**需要 Linux、systemd、Python 3.10+、`venv` 和 curl。安装时需要 root，并能访问面板 HTTPS、GitHub Raw 和 Python 依赖源。Debian/Ubuntu 使用系统 Python 且缺少 `ensurepip` 时，脚本会通过 apt 安装 `python3-venv`；其他环境请预先安装对应的 venv 依赖。
 - **原版二进制**需自行准备。运行 `uname -m`，`x86_64` 选 amd64，`aarch64` 选 arm64。从对应原版压缩包解压出 `proxy-node`。安装器会检查 ELF 架构，并依次查找当前目录的 `proxy-node`、`/opt/proxy-node/proxy-node`、`/usr/local/bin/mx-proxy-node`、`/usr/local/bin/proxy-node`。也可以用 `--binary /绝对路径/proxy-node` 指定文件。
 - **迁移**先备份旧配置，确认绑定端口及维护窗口。若旧 `xboard-node.service` 或 `proxy-node.service` 仍在运行，安装器会退出。停用旧服务会影响它管理的节点。已有本服务配置时，安装器会退出并保留配置。
@@ -29,7 +29,7 @@ A、B 使用同一个安装脚本和 systemd 服务。安装器每台主机只�
    ```
 
 3. 在「服务器管理」打开目标机器的详情并复制安装命令。在节点机运行。全新机器先把原版 `proxy-node` 解压到运行命令的目录。命令会包含 `--mode machine`、`--panel`、`--token` 和 `--machine-id`，因此无需另行输入节点 ID 或服务端通信密钥。
-4. 安装器会先验证机器凭据，再安装并启动 `mx-websocket-node.service`。运行中自动发现该机器下启用的节点，并在同一个 WebSocket 上接收配置和上报各节点流量。
+4. 安装器会先验证机器凭据，再安装并启动 `mx-websocket-node.service`。运行中自动发现该机器下启用的节点，并在 WebSocket 可用时复用一条连接。WebSocket 不可用时，节点会改走面板 HTTPS。
 
 复制的安装命令含机器 Token。请只在自己的节点机执行，分享日志或截图前遮住 Token。
 
@@ -48,6 +48,33 @@ sudo bash install.sh --binary /path/to/extracted/proxy-node
 ## C. 旧版 Docker Compose
 
 已有旧版 Xboard-Node 容器的站点，继续使用 [`compose` 分支的维护说明](https://github.com/Furina-Lee/MX-WebSocket-Node/blob/compose/README.md)。该分支使用原有 `ghcr.io/furina-lee/xboard-node:v1.13-furina.7` 镜像。要部署此 README 的新版独立节点，使用 A 或 B。
+
+## 更新已安装的新版节点
+
+适用于已有 `mx-websocket-node.service` 的 Linux 节点。下面更新的是节点适配器，沿用当前 `proxy-node`、机器凭据和状态目录。重启会短暂断开节点连接。将 `rev` 换成准备部署的已审核提交。
+
+```bash
+sudo bash <<'BASH'
+set -euo pipefail
+app=/opt/mx-websocket-node
+rev=8e0e2f2ae3c145abe59e4e5fb9097234e5068ebe
+url="https://raw.githubusercontent.com/Furina-Lee/MX-WebSocket-Node/$rev"
+backup=$(mktemp -d /var/backups/mx-node-update.XXXXXXXX)
+
+for file in mx_node.py machine.py; do
+    cp -p "$app/$file" "$backup/$file"
+    curl -fsSL --retry 3 "$url/$file" -o "$backup/new-$file"
+done
+"$app/.venv/bin/python" -m py_compile "$backup/new-mx_node.py" "$backup/new-machine.py"
+for file in mx_node.py machine.py; do
+    install -m 0644 "$backup/new-$file" "$app/$file"
+done
+printf 'Backup: %s\n' "$backup"
+systemctl restart mx-websocket-node
+BASH
+```
+
+用 `systemctl is-active mx-websocket-node`、启动日志和 `ss -ltnup` 核对服务和实际监听。若新版启动异常，把备份目录里的 `mx_node.py` 和 `machine.py` 恢复到 `/opt/mx-websocket-node/`，再重启服务。保留 `/var/lib/mx-websocket-node/`，其中有待上报记录。
 
 ## 协议与传输切换
 
@@ -68,6 +95,13 @@ sudo ss -ltnup
 - **连接失败**：机器模式先查节点是否绑定且启用、面板是否接受机器 Token。能登录但没有回执，再查面板镜像、数据库迁移和 `/ws` 反代。面板 WebSocket 使用独立主机或端口时，可在 `bridge.ws_url` 显式填写受信任的 `wss://` 地址。
 - **配置文件**为 `/etc/mx-websocket-node/config.json`。证书字段见 [示例配置](config.example.json)。修改配置后执行 `sudo systemctl restart mx-websocket-node`。使用外部证书时，服务账号需能读取它。低端口可能需要额外的绑定权限。
 - **运行数据**位于 `/var/lib/mx-websocket-node`，包括流量队列和子进程临时配置。升级或回滚时保留该目录。切回旧节点服务时，先停用新服务，再启用原先使用的旧服务。
+
+## 实测连通和流量上报
+
+1. 用测试账号刷新订阅，手动选中目标节点，确认显示的协议、传输、地址和端口匹配面板。验证网页能返回响应。
+2. 记录测试账号的已用流量及节点倍率。用这个账号通过该节点完整下载一次约 10 MB 的 HTTPS 文件，随后停止代理流量。
+3. 等待一个上报周期后刷新流量，按节点倍率比较增量。上传和协议开销也可能计入。再等一个周期确认没有重复增加同量级的流量。
+4. 下载成功但没有入账时，按测试时间检查节点日志里的 `HTTPS traffic report` 错误或 WebSocket 回执能力，并核对面板的 `node_traffic_reports` 迁移。若只有延迟或 TCP 测试成功、网页仍超时，先检查节点实际加载的协议和传输，再查客户端握手。
 
 ## 通信与计费
 
