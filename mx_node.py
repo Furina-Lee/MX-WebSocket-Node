@@ -64,6 +64,8 @@ class Bridge:
         self.snapshot = None
         self.changed = asyncio.Event()
         self.closed = False
+        self.websocket_reports = False
+        self.report_lock = asyncio.Lock()
         self.queue = sqlite3.connect(state_dir / f"traffic-{self.node_id}.sqlite3")
         self.queue.execute("PRAGMA synchronous=FULL")
         self.queue.execute("""CREATE TABLE IF NOT EXISTS outbox (
@@ -163,29 +165,74 @@ class Bridge:
         return (isinstance(data, dict) and data.get("protocol") == self.node_type
                 and type(data.get("server_port")) is int and 1 <= data["server_port"] <= 65535)
 
-    async def send_reports(self, socket, acknowledgements):
-        while not self.closed:
-            row = self.queue.execute(
-                "SELECT report_id, body FROM outbox ORDER BY seq LIMIT 1").fetchone()
-            if row is None:
-                self.changed.clear()
-                await self.changed.wait()
-                continue
-            report_id, body = row
-            data = {"report_id": report_id, "traffic": json.loads(body)}
-            if self.options.get("machine_id"):
-                data["node_id"] = int(self.node_id)
-            await socket.send_json({"event": "report.traffic", "data": data})
-            while True:
-                ack = await asyncio.wait_for(acknowledgements.get(), timeout=20)
-                if ack.get("report_id") == report_id:
-                    if ack.get("accepted") is not True:
-                        raise RuntimeError("panel declined traffic")
-                    break
-            if self.closed:
-                return
+    def pending_report(self):
+        return self.queue.execute(
+            "SELECT report_id, body FROM outbox ORDER BY seq LIMIT 1").fetchone()
+
+    def acknowledge_report(self, report_id):
+        if not self.closed:
             with self.queue:
                 self.queue.execute("DELETE FROM outbox WHERE report_id=?", (report_id,))
+
+    async def send_reports(self, socket, acknowledgements):
+        self.websocket_reports = True
+        try:
+            while not self.closed:
+                async with self.report_lock:
+                    if self.closed:
+                        return
+                    row = self.pending_report()
+                    if row:
+                        report_id, body = row
+                        data = {"report_id": report_id, "traffic": json.loads(body)}
+                        if self.options.get("machine_id"):
+                            data["node_id"] = int(self.node_id)
+                        await socket.send_json({"event": "report.traffic", "data": data})
+                        deadline = asyncio.get_running_loop().time() + 20
+                        while True:
+                            remaining = max(0, deadline - asyncio.get_running_loop().time())
+                            ack = await asyncio.wait_for(acknowledgements.get(), remaining)
+                            if ack.get("report_id") == report_id:
+                                if ack.get("accepted") is not True:
+                                    raise RuntimeError("panel declined traffic")
+                                break
+                        self.acknowledge_report(report_id)
+                    else:
+                        self.changed.clear()
+                if row is None:
+                    await self.changed.wait()
+        finally:
+            self.websocket_reports = False
+
+    async def send_https_reports(self):
+        # Allow the initial WebSocket handshake to complete before taking over.
+        await asyncio.sleep(3)
+        delay = 1
+        while not self.closed:
+            try:
+                async with self.report_lock:
+                    if self.closed:
+                        return
+                    if not self.websocket_reports and (row := self.pending_report()):
+                        report_id, body = row
+                        async with self.session.post(
+                            self.base + "/api/v2/server/report", params=self.credentials,
+                            json={"report_id": report_id, "traffic": json.loads(body)},
+                            allow_redirects=False,
+                        ) as response:
+                            result = await response.json() if response.status == 200 else None
+                            if not isinstance(result, dict) or result.get("data") is not True:
+                                LOG.warning("HTTPS traffic report awaiting acknowledgement (HTTP %s)",
+                                            response.status)
+                                raise RuntimeError("HTTPS report not acknowledged")
+                        self.acknowledge_report(report_id)
+                        delay = 1
+                        continue
+                await asyncio.sleep(1)
+            except (asyncio.TimeoutError, ClientError, OSError, RuntimeError, ValueError) as error:
+                LOG.warning("HTTPS traffic report will retry (%s)", type(error).__name__)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 60)
 
     async def read_panel(self, socket, acknowledgements):
         async for message in socket:
@@ -241,7 +288,7 @@ class Bridge:
                         tasks.append(asyncio.create_task(self.send_reports(socket, acknowledgements)))
                         LOG.info("WebSocket connected with traffic acknowledgements")
                     else:
-                        LOG.warning("Panel traffic patch missing; reports remain in the local queue")
+                        LOG.warning("Panel WebSocket traffic acknowledgements unavailable; using HTTPS reports")
                     delay = 2
                     try:
                         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -283,9 +330,10 @@ async def run(path, config=None, bridges=None, snapshots=None):
         await runner.setup()
         site = web.TCPSite(runner, "127.0.0.1", 0)
         config_file = state_dir / "worker.json"
-        ws_task = worker = None
+        ws_task = https_task = worker = None
         try:
             await site.start()
+            https_task = asyncio.create_task(bridge.send_https_reports())
             port = runner.addresses[0][1]
             worker_config = {key: value for key, value in config.items() if key != "bridge"}
             worker_config["panel"] = dict(config["panel"], api_host=f"http://127.0.0.1:{port}",
@@ -317,9 +365,10 @@ async def run(path, config=None, bridges=None, snapshots=None):
                     with contextlib.suppress(ProcessLookupError):
                         worker.kill()
                     await worker.wait()
-            if ws_task is not None:
-                ws_task.cancel()
-                await asyncio.gather(ws_task, return_exceptions=True)
+            tasks = [task for task in (ws_task, https_task) if task is not None]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             if bridges is not None:
                 bridges.pop(int(bridge.node_id), None)
             await runner.cleanup()

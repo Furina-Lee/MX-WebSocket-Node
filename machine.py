@@ -173,7 +173,7 @@ class Machine:
                         tasks.append(asyncio.create_task(self.send(socket, channels)))
                         LOG.info("Machine WebSocket connected with traffic acknowledgements")
                     else:
-                        LOG.warning("Panel traffic patch missing; reports remain in local queues")
+                        LOG.warning("Panel WebSocket traffic acknowledgements unavailable; using HTTPS reports")
                     self.refresh.set()
                     delay = 2
                     try:
