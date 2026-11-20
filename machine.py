@@ -124,8 +124,7 @@ class Machine:
             if event == "sync.config" and node_id in self.registered_ids:
                 config = data.get("config")
                 self.snapshots[node_id] = config
-                if bridge and bridge.valid_config(config):
-                    bridge.snapshot = config
+                if bridge and bridge.apply_snapshot(config):
                     LOG.info("Received configuration for node %s", node_id)
             elif event == "report.traffic.ack" and node_id in channels:
                 channel = channels[node_id][1]

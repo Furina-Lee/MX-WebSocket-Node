@@ -62,6 +62,8 @@ class Bridge:
                            else "/api/v1/server/UniProxy/")
         self.local_token = secrets.token_hex(32)
         self.snapshot = None
+        self.listener_settings = None
+        self.restart_worker = asyncio.Event()
         self.changed = asyncio.Event()
         self.closed = False
         self.websocket_reports = False
@@ -82,7 +84,25 @@ class Bridge:
             self.queue.execute("INSERT INTO binding VALUES (?)", (owner,))
         self.queue.commit()
 
+    def record_listener_settings(self, data):
+        fields = (
+            "protocol", "server_port", "listen_ip", "network", "tls",
+            "tls_settings", "server_name", "networkSettings", "network_settings", "cert_config",
+        )
+        settings = tuple(data.get(field) for field in fields)
+        if self.listener_settings is not None and settings != self.listener_settings:
+            self.restart_worker.set()
+        self.listener_settings = settings
+
+    def apply_snapshot(self, data):
+        if self.valid_config(data):
+            self.snapshot = data
+            self.record_listener_settings(data)
+            return True
+        return False
+
     def config_response(self, data, request):
+        self.record_listener_settings(data)
         data = dict(data)
         data["base_config"] = {"pull_interval": 10, "push_interval": 15}
         payload = json.dumps(data, separators=(",", ":"), sort_keys=True).encode()
@@ -146,6 +166,8 @@ class Bridge:
                     raise web.HTTPBadGateway(text="panel rejected request")
                 if endpoint == "config":
                     data = await response.json()
+                    if self.snapshot is not None:
+                        data = self.snapshot
                     if not self.valid_config(data):
                         raise web.HTTPBadGateway(text="invalid panel configuration")
                     return self.config_response(data, request)
@@ -245,8 +267,7 @@ class Bridge:
             elif event == "sync.config" and isinstance(data, dict):
                 config = data.get("config")
                 if (str(data.get("node_id", self.node_id)) == self.node_id
-                        and self.valid_config(config)):
-                    self.snapshot = config
+                        and self.apply_snapshot(config)):
                     LOG.info("Received configuration for node %s", self.node_id)
             elif event == "report.traffic.ack" and isinstance(data, dict):
                 if not acknowledgements.full():
@@ -310,6 +331,32 @@ async def reject_redirect(session, context, params):
     raise ClientError("panel redirects are disabled")
 
 
+async def run_worker(bridge, executable, config_file, state_dir, env):
+    while True:
+        bridge.restart_worker.clear()
+        worker = await asyncio.create_subprocess_exec(
+            str(executable), "-c", str(config_file), cwd=state_dir, env=env)
+        exited = asyncio.create_task(worker.wait())
+        changed = asyncio.create_task(bridge.restart_worker.wait())
+        try:
+            done, _ = await asyncio.wait((exited, changed), return_when=asyncio.FIRST_COMPLETED)
+            if changed not in done:
+                return exited.result()
+            LOG.info("Node %s listener configuration changed; restarting proxy-node", bridge.node_id)
+        finally:
+            changed.cancel()
+            await asyncio.gather(changed, return_exceptions=True)
+            if worker.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    worker.terminate()
+                try:
+                    await asyncio.wait_for(asyncio.shield(exited), 8)
+                except asyncio.TimeoutError:
+                    with contextlib.suppress(ProcessLookupError):
+                        worker.kill()
+            await exited
+
+
 async def run(path, config=None, bridges=None, snapshots=None):
     if config is None:
         config = load_config(path)
@@ -330,7 +377,7 @@ async def run(path, config=None, bridges=None, snapshots=None):
         await runner.setup()
         site = web.TCPSite(runner, "127.0.0.1", 0)
         config_file = state_dir / "worker.json"
-        ws_task = https_task = worker = None
+        ws_task = https_task = None
         try:
             await site.start()
             https_task = asyncio.create_task(bridge.send_https_reports())
@@ -347,24 +394,11 @@ async def run(path, config=None, bridges=None, snapshots=None):
             else:
                 node_id = int(bridge.node_id)
                 bridges[node_id] = bridge
-                snapshot = snapshots.get(node_id)
-                if bridge.valid_config(snapshot):
-                    bridge.snapshot = snapshot
+                bridge.apply_snapshot(snapshots.get(node_id))
             env = {key: os.environ[key] for key in ("PATH", "TZ", "LANG") if key in os.environ}
             env["HOME"] = str(state_dir)
-            worker = await asyncio.create_subprocess_exec(
-                str(executable), "-c", str(config_file), cwd=state_dir, env=env)
-            return await worker.wait()
+            return await run_worker(bridge, executable, config_file, state_dir, env)
         finally:
-            if worker is not None and worker.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    worker.terminate()
-                try:
-                    await asyncio.wait_for(worker.wait(), 8)
-                except asyncio.TimeoutError:
-                    with contextlib.suppress(ProcessLookupError):
-                        worker.kill()
-                    await worker.wait()
             tasks = [task for task in (ws_task, https_task) if task is not None]
             for task in tasks:
                 task.cancel()

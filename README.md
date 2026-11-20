@@ -49,6 +49,12 @@ sudo bash install.sh --binary /path/to/extracted/proxy-node
 
 已有旧版 Xboard-Node 容器的站点，继续使用 [`compose` 分支的维护说明](https://github.com/Furina-Lee/MX-WebSocket-Node/blob/compose/README.md)。该分支使用原有 `ghcr.io/furina-lee/xboard-node:v1.13-furina.7` 镜像。要部署此 README 的新版独立节点，使用 A 或 B。
 
+## 协议与传输切换
+
+机器模式通过节点发现跟踪同一节点的协议类型。切换协议类型时，会关闭旧进程再启动新进程。在同一协议内更换传输（如 MundoRDP 转 MC1）、监听端口或 TLS 设置时，节点会在收到 WebSocket 配置或下一次 HTTPS 配置查询后，仅重启该节点的 `proxy-node`。这会短暂断开该节点的现有连接。其他节点和流量上报队列继续运行。
+
+独立模式的协议类型来自本地 `panel.node_type`。若要在它上面更换协议类型，还需要更新该字段。两种模式都支持同一协议内的传输、端口和 TLS 自动切换。
+
 ## 验收与维护
 
 ```bash
