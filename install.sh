@@ -11,8 +11,10 @@ api_key=
 machine_id=
 version=dev
 binary=
+migrate=0
 while (( $# )); do
   case "$1" in
+    --migrate-xboard-node) migrate=1; shift ;;
     --mode|--panel|--token|--machine-id|--version|--binary)
       (( $# >= 2 )) || fail "缺少 $1 的参数。"
       case "$1" in
@@ -26,6 +28,7 @@ while (( $# )); do
       shift 2 ;;
     -h|--help)
       echo 'sudo bash install.sh [--binary /path/to/proxy-node]'
+      echo '迁移旧 systemd 节点：在机器安装命令末尾追加 --migrate-xboard-node'
       echo 'Xboard: --mode machine --panel HTTPS_URL --token MACHINE_TOKEN --machine-id ID [--version REF]'
       exit 0 ;;
     --*) fail "未知参数：$1" ;;
@@ -45,7 +48,16 @@ config_file="$config_dir/config.json"
 if [[ -e $config_file ]]; then
   fail "已有配置 $config_file；首次安装脚本已退出。"
 fi
-for service in xboard-node.service proxy-node.service; do
+legacy=xboard-node.service
+new=mx-websocket-node.service
+if (( migrate )); then
+  [[ $mode == machine ]] || fail '旧服务迁移仅支持面板的机器安装命令。'
+  systemctl is-active --quiet "$legacy" || fail '未找到正在运行的 xboard-node.service。'
+  [[ $(systemctl show -p LoadState --value "$new") == not-found ]] ||
+    fail '已存在 MX-WebSocket-Node 服务，请先确认原部署状态。'
+fi
+for service in "$legacy" proxy-node.service; do
+  if (( migrate )) && [[ $service == "$legacy" ]]; then continue; fi
   if systemctl is-active --quiet "$service"; then
     fail "$service 仍在运行。请先确认迁移窗口并停用旧服务，再重试。"
   fi
@@ -90,7 +102,29 @@ esac
 [[ -n ${api_key//[[:space:]]/} ]] || fail '通信密钥不能为空。'
 
 scratch=$(mktemp -d)
-trap 'unset api_key; rm -rf -- "$scratch"' EXIT
+cutover=0
+legacy_enabled=0
+cleanup() {
+  local status=$?
+  trap - EXIT
+  set +e
+  unset api_key
+  if (( status != 0 && cutover )); then
+    echo '迁移失败，正在恢复旧 Xboard-Node 服务。' >&2
+    systemctl disable --now "$new" >/dev/null 2>&1
+    rm -f -- /etc/systemd/system/mx-websocket-node.service "$config_file"
+    systemctl daemon-reload
+    if (( legacy_enabled )); then systemctl enable "$legacy"; fi
+    if systemctl start "$legacy" && systemctl is-active --quiet "$legacy"; then
+      echo '旧服务已恢复。' >&2
+    else
+      echo '旧服务恢复失败，请检查 journalctl -u xboard-node。' >&2
+    fi
+  fi
+  rm -rf -- "$scratch"
+  exit "$status"
+}
+trap cleanup EXIT
 source_dir=
 if [[ -n ${BASH_SOURCE[0]:-} && -f ${BASH_SOURCE[0]} && $version == dev ]]; then
   source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -111,7 +145,7 @@ fi
 printf '%s' "$api_key" | python3 -c '
 import json, pathlib, subprocess, sys
 from urllib.parse import urlsplit
-template, output, url, node_id, mode = sys.argv[1:]
+template, output, url, node_id, mode, migrate = sys.argv[1:]
 parsed = urlsplit(url)
 if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
         or parsed.password is not None or parsed.query or parsed.fragment
@@ -147,6 +181,16 @@ if mode == "machine":
     except (ValueError, KeyError, TypeError):
         sys.exit("面板响应没有有效的节点列表。请检查面板版本和 API 路由。")
     print(f"机器认证通过，当前有 {len(nodes)} 个已启用的节点。")
+    if not nodes and migrate == "1":
+        sys.exit("机器没有已启用节点，已取消迁移。")
+    if migrate == "1":
+        try:
+            ids = [str(int(node["id"])) for node in nodes]
+        except (TypeError, ValueError, KeyError):
+            sys.exit("面板返回了无效的节点 ID，已取消迁移。")
+        if any(int(node_id) <= 0 for node_id in ids):
+            sys.exit("面板返回了无效的节点 ID，已取消迁移。")
+        pathlib.Path(output).with_name("nodes").write_text("\n".join(ids) + "\n", encoding="utf-8")
     if not nodes:
         print("请在面板绑定并启用节点。服务启动后会自动发现它们。")
     data["machine"] = {"id": int(node_id)}
@@ -157,7 +201,7 @@ else:
 with pathlib.Path(output).open("x", encoding="utf-8") as config:
     json.dump(data, config, ensure_ascii=False, indent=2)
     config.write("\n")
-' "$source_dir/config.example.json" "$scratch/config.json" "$panel_url" "$config_id" "$mode"
+' "$source_dir/config.example.json" "$scratch/config.json" "$panel_url" "$config_id" "$mode" "$migrate"
 unset api_key
 
 # Debian and Ubuntu package ensurepip separately from the Python interpreter.
@@ -187,8 +231,37 @@ done
 )
 # Repair directories left by an earlier installation using a restrictive umask.
 chmod -R go+rX -- "$install_dir/.venv"
+if (( migrate )); then
+  command -v journalctl >/dev/null || fail '迁移验证需要 journalctl。'
+  systemctl is-enabled --quiet "$legacy" && legacy_enabled=1
+  cutover=1
+  systemctl stop "$legacy"
+fi
 install -m 0644 "$source_dir/mx-websocket-node.service" /etc/systemd/system/
 install -m 0640 -o root -g mxnode "$scratch/config.json" "$config_file"
 systemctl daemon-reload
-systemctl enable --now mx-websocket-node.service
+systemctl enable --now "$new"
+if (( migrate )); then
+  verified=0
+  for (( attempt=0; attempt<30; attempt++ )); do
+    invocation=$(systemctl show -p InvocationID --value "$new")
+    startup_log=
+    if [[ -n $invocation && $invocation != 00000000000000000000000000000000 ]]; then
+      startup_log=$(journalctl "_SYSTEMD_INVOCATION_ID=$invocation" --no-pager -o cat)
+    fi
+    verified=1
+    while IFS= read -r node; do
+      if ! grep -Eq "[-]$node\] Started with [0-9]+ users" <<< "$startup_log"; then
+        verified=0
+        break
+      fi
+    done < "$scratch/nodes"
+    if (( verified )) && systemctl is-active --quiet "$new"; then break; fi
+    sleep 2
+  done
+  (( verified )) && systemctl is-active --quiet "$new" || fail '新服务未在 60 秒内启动全部已启用节点。'
+  if (( legacy_enabled )); then systemctl disable "$legacy"; fi
+  cutover=0
+  echo '迁移完成。旧 Xboard-Node 的程序、systemd 单元和配置已保留，可用于回滚。'
+fi
 echo '节点服务已启动。可运行 journalctl -u mx-websocket-node -f 检查面板连接。'

@@ -49,6 +49,29 @@ sudo bash install.sh --binary /path/to/extracted/proxy-node
 
 已有旧版 Xboard-Node 容器的站点，继续使用 [`compose` 分支的维护说明](https://github.com/Furina-Lee/MX-WebSocket-Node/blob/compose/README.md)。该分支使用原有 `ghcr.io/furina-lee/xboard-node:v1.13-furina.7` 镜像。要部署此 README 的新版独立节点，使用 A 或 B。
 
+## 从旧 Xboard-Node 一键迁移
+
+适用于同一台 Linux 机器上正在运行的 `xboard-node.service`，并使用新版 Xboard 面板的机器管理。先确认要迁移的节点都已绑定到该机器且已启用，协议与当前 `proxy-node` 兼容。记录原节点的监听端口。已有 Docker Compose 节点须先安排停止旧容器，随后使用 [机器一键安装](#a-服务器管理一键安装)。
+
+**执行方法**：在面板「服务器管理」复制该机器的新版安装命令，在末尾追加 `--migrate-xboard-node`，例如：
+
+```bash
+curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/Furina-Lee/MX-WebSocket-Node/dev/install.sh | sudo bash -s -- --mode machine --panel 'https://panel.example.com' --token '<机器 Token>' --machine-id 28 --migrate-xboard-node
+```
+
+使用实际面板地址、机器 Token 和机器 ID。如果安装器找不到原版 `proxy-node`，先解压对应架构的原版发行包到当前目录，或追加 `--binary /path/to/proxy-node`。
+
+脚本在旧服务仍在线时验证机器配置、准备新程序和 Python 依赖，再短暂停用旧服务。新服务须在验收窗口内启动面板分配的所有节点，否则脚本会尝试恢复旧服务。成功后停止并取消旧服务的开机启动，保留旧程序和配置。旧服务独有的本地证书及自定义内核参数不会自动搬迁，请事先核对。启动日志只能确认进程已加载配置，迁移后仍须刷新订阅、实际下载并核对计费。
+
+如需手动回滚，在节点机执行：
+
+```bash
+sudo systemctl disable --now mx-websocket-node
+sudo systemctl start xboard-node
+```
+
+如果旧服务迁移前设为开机启动，回滚后再执行 `sudo systemctl enable xboard-node`。保留新版的配置和状态目录，方便再次切换并保留待上报记录。
+
 ## 更新已安装的新版节点
 
 适用于已有 `mx-websocket-node.service` 的 Linux 节点。下面更新的是节点适配器，沿用当前 `proxy-node`、机器凭据和状态目录。重启会短暂断开节点连接。将 `rev` 换成准备部署的已审核提交。
