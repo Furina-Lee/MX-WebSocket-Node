@@ -15,8 +15,8 @@ A、B 使用同一个安装脚本和 systemd 服务。安装器每台主机只�
 ## 安装前检查
 
 - **面板**使用已集成流量回执支持的 [Furina-Lee/Xboard 镜像](https://github.com/Furina-Lee/Xboard#docker-镜像)，确认已执行 `node_traffic_reports` 数据库迁移。WebSocket 为可选实时通道。启用时，反代应支持 `/ws` 升级；只用 HTTPS 时，节点也能同步配置并上报流量，无需对公网开放 `8076`。自编译旧版面板时，可先检查并应用 [面板补丁](xboard-panel.patch)，再重建面板并重启 WebSocket worker。补丁基于 Xboard 提交 `64b5e15`。
-- **节点机**需要 Linux、systemd、Python 3.10+、`venv` 和 curl。安装时需要 root，并能访问面板 HTTPS、GitHub Raw 和 Python 依赖源。Debian/Ubuntu 使用系统 Python 且缺少 `ensurepip` 时，脚本会通过 apt 安装 `python3-venv`；其他环境请预先安装对应的 venv 依赖。
-- **原版二进制**需自行准备。运行 `uname -m`，`x86_64` 选 amd64，`aarch64` 选 arm64。从对应原版压缩包解压出 `proxy-node`。安装器会检查 ELF 架构，并依次查找当前目录的 `proxy-node`、`/opt/proxy-node/proxy-node`、`/usr/local/bin/mx-proxy-node`、`/usr/local/bin/proxy-node`。也可以用 `--binary /绝对路径/proxy-node` 指定文件。
+- **节点机**需要 Linux、systemd、Python 3.10+、`venv` 和 curl。安装时需要 root，并能访问面板 HTTPS、GitHub Raw、GitHub Releases 和 Python 依赖源。Debian/Ubuntu 使用系统 Python 且缺少 `ensurepip` 时，脚本会通过 apt 安装 `python3-venv`；其他环境请预先安装对应的 venv 依赖。
+- **MX 内核**可以自动下载。安装器优先使用 `--binary /绝对路径/proxy-node` 指定的文件，或按顺序查找当前目录的 `proxy-node`、`/opt/proxy-node/proxy-node`、`/usr/local/bin/mx-proxy-node`、`/usr/local/bin/proxy-node`。这些位置都没有内核时，安装器从 [v1.13-furina.7 Release](https://github.com/Furina-Lee/MX-WebSocket-Node/releases/tag/v1.13-furina.7) 下载对应架构的内核并校验 SHA-256。所有来源都会检查 ELF 架构。`uname -m` 输出 `x86_64` 时使用 amd64，输出 `aarch64` 时使用 arm64。
 - **迁移**先备份旧配置，确认绑定端口及维护窗口。若旧 `xboard-node.service` 或 `proxy-node.service` 仍在运行，安装器会退出。停用旧服务会影响它管理的节点。已有本服务配置时，安装器会退出并保留配置。
 
 ## A. 服务器管理一键安装
@@ -28,19 +28,19 @@ A、B 使用同一个安装脚本和 systemd 服务。安装器每台主机只�
    https://raw.githubusercontent.com/Furina-Lee/MX-WebSocket-Node/dev/install.sh
    ```
 
-3. 在「服务器管理」打开目标机器的详情并复制安装命令。在节点机运行。全新机器先把原版 `proxy-node` 解压到运行命令的目录。命令会包含 `--mode machine`、`--panel`、`--token` 和 `--machine-id`，因此无需另行输入节点 ID 或服务端通信密钥。
+3. 在「服务器管理」打开目标机器的详情并复制安装命令。在节点机运行。全新机器会自动下载 MX 内核。命令会包含 `--mode machine`、`--panel`、`--token` 和 `--machine-id`，因此无需另行输入节点 ID 或服务端通信密钥。
 4. 安装器会先验证机器凭据，再安装并启动 `mx-websocket-node.service`。运行中自动发现该机器下启用的节点，并在 WebSocket 可用时复用一条连接。WebSocket 不可用时，节点会改走面板 HTTPS。
 
 复制的安装命令含机器 Token。请只在自己的节点机执行，分享日志或截图前遮住 Token。
 
 ## B. 手动安装独立单节点
 
-先在面板创建一个独立部署的 MX 节点，记下节点 ID。将下方最后一行的路径换成实际二进制路径：
+先在面板创建一个独立部署的 MX 节点，记下节点 ID。运行以下命令。已有本地内核时，可以追加 `--binary /绝对路径/proxy-node`。
 
 ```bash
 git clone --branch dev --depth 1 https://github.com/Furina-Lee/MX-WebSocket-Node.git
 cd MX-WebSocket-Node
-sudo bash install.sh --binary /path/to/extracted/proxy-node
+sudo bash install.sh
 ```
 
 按提示填写面板 HTTPS 地址、节点 ID、面板服务端通信密钥 `api_key`。密钥输入不回显。此模式使用面板的**服务端通信密钥**，机器 Token 用于 A 的机器模式。
@@ -73,7 +73,7 @@ sudo journalctl -u mx-websocket-node@airport-a.service -f
 curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/Furina-Lee/MX-WebSocket-Node/dev/install.sh | sudo bash -s -- --mode machine --panel 'https://panel.example.com' --token '<机器 Token>' --machine-id 28 --migrate-xboard-node
 ```
 
-使用实际面板地址、机器 Token 和机器 ID。如果安装器找不到原版 `proxy-node`，先解压对应架构的原版发行包到当前目录，或追加 `--binary /path/to/proxy-node`。
+使用实际面板地址、机器 Token 和机器 ID。无法自动下载时，追加 `--binary /path/to/proxy-node` 使用对应架构的本地内核。
 
 脚本在旧服务仍在线时验证机器配置、准备新程序和 Python 依赖，再短暂停用旧服务。新服务须在验收窗口内启动面板分配的所有节点，否则脚本会尝试恢复旧服务。成功后停止并取消旧服务的开机启动，保留旧程序和配置。旧服务独有的本地证书及自定义内核参数不会自动搬迁，请事先核对。启动日志只能确认进程已加载配置，迁移后仍须刷新订阅、实际下载并核对计费。
 

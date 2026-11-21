@@ -79,27 +79,6 @@ for service in "$legacy" proxy-node.service; do
   fi
 done
 
-if [[ -z $binary ]]; then
-  for candidate in ./proxy-node /opt/proxy-node/proxy-node /usr/local/bin/mx-proxy-node /usr/local/bin/proxy-node; do
-    if [[ -f $candidate && -r $candidate ]]; then
-      binary=$candidate
-      break
-    fi
-  done
-fi
-[[ -n $binary && -f $binary && -r $binary ]] ||
-  fail '未找到原版 MX 二进制。请把对应架构的 proxy-node 解压到当前目录，再运行面板命令。'
-python3 - "$binary" <<'PY'
-import platform
-import sys
-with open(sys.argv[1], "rb") as binary:
-    header = binary.read(20)
-expected = {"x86_64": 62, "aarch64": 183}.get(platform.machine())
-if (expected is None or len(header) != 20 or header[:6] != b"\x7fELF\x02\x01"
-        or int.from_bytes(header[18:20], "little") != expected):
-    sys.exit("proxy-node 文件无效，或架构与本机不匹配。")
-PY
-
 case "$mode" in
   machine)
     [[ -n $panel_url && -n $api_key && $machine_id =~ ^[1-9][0-9]*$ ]] ||
@@ -223,6 +202,55 @@ with pathlib.Path(output).open("x", encoding="utf-8") as config:
     config.write("\n")
 ' "$source_dir/config.example.json" "$scratch/config.json" "$panel_url" "$config_id" "$mode" "$migrate" "$install_dir" "$state_name"
 unset api_key
+
+kernel_sha256=
+if [[ -z $binary ]]; then
+  for candidate in ./proxy-node /opt/proxy-node/proxy-node /usr/local/bin/mx-proxy-node /usr/local/bin/proxy-node; do
+    if [[ -f $candidate && -r $candidate ]]; then
+      binary=$candidate
+      break
+    fi
+  done
+fi
+if [[ -z $binary ]]; then
+  command -v curl >/dev/null || fail '自动下载 MX 内核需要 curl，也可以用 --binary 指定本地文件。'
+  # Pin the release and digest together so a changed asset cannot be installed.
+  kernel_release=v1.13-furina.7
+  case "$(uname -m)" in
+    x86_64)
+      kernel_arch=amd64
+      kernel_sha256=9ab99ea34acc9daf78b34ee79af9e6e305d73016af2af44b7c2687b1d29d54ec ;;
+    aarch64)
+      kernel_arch=arm64
+      kernel_sha256=9249be0a67ca80e508d4625aeb9fa0745a28de5fe545e8f5fd39f0b7ec2b8f0f ;;
+    *) fail '自动下载 MX 内核只支持 Linux amd64 和 arm64。' ;;
+  esac
+  binary="$scratch/proxy-node"
+  echo "正在下载 MX 内核（$kernel_release，linux-$kernel_arch）..."
+  curl -fsSL --proto '=https' --proto-redir '=https' --retry 2 \
+    --connect-timeout 10 --max-time 90 -o "$binary" -- \
+    "https://github.com/Furina-Lee/MX-WebSocket-Node/releases/download/$kernel_release/mx-proxy-node-linux-$kernel_arch" ||
+    fail 'MX 内核下载失败。请检查节点机能否访问 GitHub Releases，或用 --binary 指定本地文件。'
+fi
+[[ -f $binary && -r $binary ]] || fail "无法读取 MX 内核文件：$binary"
+python3 - "$binary" "$kernel_sha256" <<'PY'
+import hashlib
+import platform
+import sys
+with open(sys.argv[1], "rb") as binary:
+    header = binary.read(20)
+    if sys.argv[2]:
+        binary.seek(0)
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: binary.read(1024 * 1024), b""):
+            digest.update(chunk)
+        if digest.hexdigest() != sys.argv[2]:
+            sys.exit("下载的 MX 内核 SHA-256 校验失败，已停止安装。")
+expected = {"x86_64": 62, "aarch64": 183}.get(platform.machine())
+if (expected is None or len(header) != 20 or header[:6] != b"\x7fELF\x02\x01"
+        or int.from_bytes(header[18:20], "little") != expected):
+    sys.exit("proxy-node 文件无效，或架构与本机不匹配。")
+PY
 
 # Debian and Ubuntu package ensurepip separately from the Python interpreter.
 if ! python3 -c "import ensurepip" >/dev/null 2>&1; then
