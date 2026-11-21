@@ -49,6 +49,12 @@ sudo bash install.sh --binary /path/to/extracted/proxy-node
 
 已有旧版 Xboard-Node 容器的站点，继续使用 [`compose` 分支的维护说明](https://github.com/Furina-Lee/MX-WebSocket-Node/blob/compose/README.md)。该分支使用原有 `ghcr.io/furina-lee/xboard-node:v1.13-furina.7` 镜像。要部署此 README 的新版独立节点，使用 A 或 B。
 
+## 同机连接多个面板
+
+在每个 Xboard 面板的「系统配置 → 节点设置」填写不同的「节点实例名称」，再从「服务器管理」复制安装命令。也可手动追加 `--instance airport-a`。名称使用 1–32 个小写字母、数字或连字符，首字符须为字母或数字。
+
+命名实例使用 `mx-websocket-node@airport-a.service`、`/etc/mx-websocket-node/airport-a.json` 和 `/var/lib/mx-websocket-node-airport-a/`。程序安装到 `/opt/mx-websocket-node/airport-a/`。请在各面板分配互不冲突的监听地址和端口。留空时继续使用默认服务和配置。
+
 ## 从旧 Xboard-Node 一键迁移
 
 适用于同一台 Linux 机器上正在运行的 `xboard-node.service`，并使用新版 Xboard 面板的机器管理。先确认要迁移的节点都已绑定到该机器且已启用，协议与当前 `proxy-node` 兼容。记录原节点的监听端口。已有 Docker Compose 节点须先安排停止旧容器，随后使用 [机器一键安装](#a-服务器管理一键安装)。

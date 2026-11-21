@@ -12,10 +12,11 @@ machine_id=
 version=dev
 binary=
 migrate=0
+instance=
 while (( $# )); do
   case "$1" in
     --migrate-xboard-node) migrate=1; shift ;;
-    --mode|--panel|--token|--machine-id|--version|--binary)
+    --mode|--panel|--token|--machine-id|--version|--binary|--instance)
       (( $# >= 2 )) || fail "缺少 $1 的参数。"
       case "$1" in
         --mode) mode=$2 ;;
@@ -24,12 +25,13 @@ while (( $# )); do
         --machine-id) machine_id=$2 ;;
         --version) version=$2 ;;
         --binary) binary=$2 ;;
+        --instance) instance=$2; [[ $instance =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || fail "实例名称无效。" ;;
       esac
       shift 2 ;;
     -h|--help)
       echo 'sudo bash install.sh [--binary /path/to/proxy-node]'
       echo '迁移旧 systemd 节点：在机器安装命令末尾追加 --migrate-xboard-node'
-      echo 'Xboard: --mode machine --panel HTTPS_URL --token MACHINE_TOKEN --machine-id ID [--version REF]'
+      echo 'Xboard: --mode machine --panel HTTPS_URL --token MACHINE_TOKEN --machine-id ID [--version REF] [--instance NAME]'
       exit 0 ;;
     --*) fail "未知参数：$1" ;;
     *) [[ -z "$binary" ]] || fail '只能指定一个 proxy-node 文件。'; binary=$1; shift ;;
@@ -45,11 +47,19 @@ done
 install_dir=/opt/mx-websocket-node
 config_dir=/etc/mx-websocket-node
 config_file="$config_dir/config.json"
-if [[ -e $config_file ]]; then
+new=mx-websocket-node.service
+state_name=mx-websocket-node
+if [[ -n $instance ]]; then
+  install_dir="$install_dir/$instance"
+  config_file="$config_dir/$instance.json"
+  state_name="mx-websocket-node-$instance"
+  new="mx-websocket-node@$instance.service"
+fi
+unit_file="/etc/systemd/system/$new"
+if [[ -e $config_file || -e $unit_file ]]; then
   fail "已有配置 $config_file；首次安装脚本已退出。"
 fi
 legacy=xboard-node.service
-new=mx-websocket-node.service
 if (( migrate )); then
   [[ $mode == machine ]] || fail '旧服务迁移仅支持面板的机器安装命令。'
   systemctl is-active --quiet "$legacy" || fail '未找到正在运行的 xboard-node.service。'
@@ -57,7 +67,7 @@ if (( migrate )); then
     fail '已存在 MX-WebSocket-Node 服务，请先确认原部署状态。'
 fi
 for service in "$legacy" proxy-node.service; do
-  if (( migrate )) && [[ $service == "$legacy" ]]; then continue; fi
+  if [[ -n $instance ]] || { (( migrate )) && [[ $service == "$legacy" ]]; }; then continue; fi
   if systemctl is-active --quiet "$service"; then
     fail "$service 仍在运行。请先确认迁移窗口并停用旧服务，再重试。"
   fi
@@ -112,7 +122,7 @@ cleanup() {
   if (( status != 0 && cutover )); then
     echo '迁移失败，正在恢复旧 Xboard-Node 服务。' >&2
     systemctl disable --now "$new" >/dev/null 2>&1
-    rm -f -- /etc/systemd/system/mx-websocket-node.service "$config_file"
+    rm -f -- "$unit_file" "$config_file"
     systemctl daemon-reload
     if (( legacy_enabled )); then systemctl enable "$legacy"; fi
     if systemctl start "$legacy" && systemctl is-active --quiet "$legacy"; then
@@ -145,7 +155,7 @@ fi
 printf '%s' "$api_key" | python3 -c '
 import json, pathlib, subprocess, sys
 from urllib.parse import urlsplit
-template, output, url, node_id, mode, migrate = sys.argv[1:]
+template, output, url, node_id, mode, migrate, install_dir, state_name = sys.argv[1:]
 parsed = urlsplit(url)
 if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
         or parsed.password is not None or parsed.query or parsed.fragment
@@ -155,7 +165,11 @@ if not node_id.isascii() or not node_id.isdecimal() or int(node_id) <= 0:
     sys.exit("ID 必须是正整数。")
 data = json.loads(pathlib.Path(template).read_text(encoding="utf-8"))
 url, key = url.rstrip("/"), sys.stdin.read()
-data["panel"].update(api_host=url, api_key=key)
+data["panel"].update(api_host=url, api_key=key, node_config_defaults_path=install_dir + "/node_config.defaults.json")
+state_dir = "/var/lib/" + state_name
+data["bridge"].update(binary=install_dir + "/proxy-node", state_dir=state_dir)
+data["mundoproxy"]["asset_path"] = state_dir
+data["cert"].update(cert_file=state_dir + "/cert.pem", key_file=state_dir + "/key.pem")
 if mode == "machine":
     payload = json.dumps({"machine_id": int(node_id), "token": key}).encode()
     result = subprocess.run(
@@ -201,7 +215,7 @@ else:
 with pathlib.Path(output).open("x", encoding="utf-8") as config:
     json.dump(data, config, ensure_ascii=False, indent=2)
     config.write("\n")
-' "$source_dir/config.example.json" "$scratch/config.json" "$panel_url" "$config_id" "$mode" "$migrate"
+' "$source_dir/config.example.json" "$scratch/config.json" "$panel_url" "$config_id" "$mode" "$migrate" "$install_dir" "$state_name"
 unset api_key
 
 # Debian and Ubuntu package ensurepip separately from the Python interpreter.
@@ -237,7 +251,11 @@ if (( migrate )); then
   cutover=1
   systemctl stop "$legacy"
 fi
-install -m 0644 "$source_dir/mx-websocket-node.service" /etc/systemd/system/
+sed -e "s|StateDirectory=mx-websocket-node$|StateDirectory=$state_name|" \
+    -e "s|/opt/mx-websocket-node|$install_dir|g" \
+    -e "s|/etc/mx-websocket-node/config.json|$config_file|g" \
+    "$source_dir/mx-websocket-node.service" > "$scratch/service"
+install -m 0644 "$scratch/service" "$unit_file"
 install -m 0640 -o root -g mxnode "$scratch/config.json" "$config_file"
 systemctl daemon-reload
 systemctl enable --now "$new"
@@ -264,4 +282,4 @@ if (( migrate )); then
   cutover=0
   echo '迁移完成。旧 Xboard-Node 的程序、systemd 单元和配置已保留，可用于回滚。'
 fi
-echo '节点服务已启动。可运行 journalctl -u mx-websocket-node -f 检查面板连接。'
+echo "节点服务已启动。可运行 journalctl -u $new -f 检查面板连接。"
