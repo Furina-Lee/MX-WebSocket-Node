@@ -53,7 +53,15 @@ sudo bash install.sh --binary /path/to/extracted/proxy-node
 
 在每个 Xboard 面板的「系统配置 → 节点设置」填写不同的「节点实例名称」，再从「服务器管理」复制安装命令。也可手动追加 `--instance airport-a`。名称使用 1–32 个小写字母、数字或连字符，首字符须为字母或数字。
 
-命名实例使用 `mx-websocket-node@airport-a.service`、`/etc/mx-websocket-node/airport-a.json` 和 `/var/lib/mx-websocket-node-airport-a/`。程序安装到 `/opt/mx-websocket-node/airport-a/`。请在各面板分配互不冲突的监听地址和端口。留空时继续使用默认服务和配置。
+命名实例使用 `mx-websocket-node@airport-a.service`、`/etc/mx-websocket-node/airport-a.json` 和 `/var/lib/mx-websocket-node-airport-a/`。程序安装到 `/opt/mx-websocket-node/airport-a/`。请在各面板分配互不冲突的监听地址和端口。留空时使用默认服务和配置。同名 unit 已加载或配置文件已存在时，安装器会退出。同一台机器上的并行安装会排队执行。
+
+管理命名实例时，带上完整服务名：
+
+```bash
+sudo systemctl status mx-websocket-node@airport-a.service
+sudo systemctl restart mx-websocket-node@airport-a.service
+sudo journalctl -u mx-websocket-node@airport-a.service -f
+```
 
 ## 从旧 Xboard-Node 一键迁移
 

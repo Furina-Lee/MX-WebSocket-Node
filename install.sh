@@ -39,7 +39,7 @@ while (( $# )); do
 done
 
 [[ $EUID == 0 && $(uname -s) == Linux ]] || fail '请在 Linux 节点上以 root 安装。'
-for command in python3 systemctl install getent useradd mktemp; do
+for command in python3 systemctl install getent useradd mktemp flock; do
   command -v "$command" >/dev/null || fail "缺少命令：$command"
 done
 [[ $version =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || fail '无效的版本或 Git ref。'
@@ -56,15 +56,21 @@ if [[ -n $instance ]]; then
   new="mx-websocket-node@$instance.service"
 fi
 unit_file="/etc/systemd/system/$new"
-if [[ -e $config_file || -e $unit_file ]]; then
-  fail "已有配置 $config_file；首次安装脚本已退出。"
+# Serialize installs because they share the system user and systemd reload.
+exec 9>/run/lock/mx-websocket-node-install.lock
+flock -w 180 9 || fail '另一项节点安装仍在运行，请等待它完成。'
+if [[ -e $config_file || -L $config_file ]]; then
+  fail "配置 $config_file 已存在；请使用不同的实例名称。"
+fi
+load_state=$(systemctl show -p LoadState --value "$new") ||
+  fail "无法查询 systemd 单元 $new。"
+if [[ -e $unit_file || -L $unit_file || $load_state != not-found ]]; then
+  fail "systemd 单元 $new 已存在；请选择其他实例名称。"
 fi
 legacy=xboard-node.service
 if (( migrate )); then
   [[ $mode == machine ]] || fail '旧服务迁移仅支持面板的机器安装命令。'
   systemctl is-active --quiet "$legacy" || fail '未找到正在运行的 xboard-node.service。'
-  [[ $(systemctl show -p LoadState --value "$new") == not-found ]] ||
-    fail '已存在 MX-WebSocket-Node 服务，请先确认原部署状态。'
 fi
 for service in "$legacy" proxy-node.service; do
   if [[ -n $instance ]] || { (( migrate )) && [[ $service == "$legacy" ]]; }; then continue; fi
