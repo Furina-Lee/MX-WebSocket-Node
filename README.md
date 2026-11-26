@@ -16,7 +16,7 @@ A、B 使用同一个安装脚本。单个面板在一台机器上管理多个�
 
 - **面板**使用已集成流量回执支持的 [Furina-Lee/Xboard 镜像](https://github.com/Furina-Lee/Xboard#docker-镜像)，确认已执行 `node_traffic_reports` 数据库迁移。WebSocket 为可选实时通道。启用时，反代应支持 `/ws` 升级；只用 HTTPS 时，节点也能同步配置并上报流量，无需对公网开放 `8076`。自编译旧版面板时，可先检查并应用 [面板补丁](xboard-panel.patch)，再重建面板并重启 WebSocket worker。补丁基于 Xboard 提交 `64b5e15`。
 - **节点机**需要 Linux、systemd、Python 3.10+、`venv` 和 curl。安装时需要 root，并能访问面板 HTTPS、GitHub Raw、GitHub Releases 和 Python 依赖源。Debian/Ubuntu 使用系统 Python 且缺少 `ensurepip` 时，脚本会通过 apt 安装 `python3-venv`；其他环境请预先安装对应的 venv 依赖。
-- **MX 内核**可以自动下载。安装器优先使用 `--binary /绝对路径/proxy-node` 指定的文件，或按顺序查找当前目录的 `proxy-node`、`/opt/proxy-node/proxy-node`、`/usr/local/bin/mx-proxy-node`、`/usr/local/bin/proxy-node`。这些位置都没有内核时，安装器从 [v1.13-furina.7 Release](https://github.com/Furina-Lee/MX-WebSocket-Node/releases/tag/v1.13-furina.7) 下载对应架构的内核并校验 SHA-256。所有来源都会检查 ELF 架构。`uname -m` 输出 `x86_64` 时使用 amd64，输出 `aarch64` 时使用 arm64。
+- **MX 内核**可以自动下载。安装器优先使用 `--binary /绝对路径/proxy-node` 指定的文件，或按顺序查找当前目录的 `proxy-node`、`/opt/proxy-node/proxy-node`、`/usr/local/bin/mx-proxy-node`、`/usr/local/bin/proxy-node`。这些位置都没有内核时，安装器从 [mx-node-20261126 Release](https://github.com/Furina-Lee/MX-WebSocket-Node/releases/tag/mx-node-20261126) 下载对应架构的内核并校验 SHA-256。所有来源都会检查 ELF 架构。`uname -m` 输出 `x86_64` 时使用 amd64，输出 `aarch64` 时使用 arm64。
 - **迁移**先备份旧配置，确认绑定端口及维护窗口。若旧 `xboard-node.service` 或 `proxy-node.service` 仍在运行，安装器会退出。停用旧服务会影响它管理的节点。已有本服务配置时，安装器会退出并保留配置。
 
 ## A. 服务器管理一键安装
@@ -88,30 +88,58 @@ sudo systemctl start xboard-node
 
 ## 更新已安装的新版节点
 
-适用于已有 `mx-websocket-node.service` 的 Linux 节点。下面更新的是节点适配器，沿用当前 `proxy-node`、机器凭据和状态目录。重启会短暂断开节点连接。将 `rev` 换成准备部署的已审核提交。
+适用于已安装的 Linux 节点。命令会备份当前适配器和内核，在校验后更新两者，保留原配置、机器凭据和状态目录。使用命名实例时，将 `instance=` 改成实际实例名称。重启会短暂断开该实例的连接。
 
 ```bash
 sudo bash <<'BASH'
 set -euo pipefail
+umask 077
+instance=
 app=/opt/mx-websocket-node
-rev=8e0e2f2ae3c145abe59e4e5fb9097234e5068ebe
-url="https://raw.githubusercontent.com/Furina-Lee/MX-WebSocket-Node/$rev"
+service=mx-websocket-node.service
+if [[ -n $instance ]]; then
+    app="$app/$instance"
+    service="mx-websocket-node@$instance.service"
+fi
+case "$(uname -m)" in
+    x86_64) arch=amd64 ;;
+    aarch64) arch=arm64 ;;
+    *) echo '仅支持 Linux amd64 和 arm64' >&2; exit 1 ;;
+esac
+release=mx-node-20261126
+repo=https://github.com/Furina-Lee/MX-WebSocket-Node
+raw="https://raw.githubusercontent.com/Furina-Lee/MX-WebSocket-Node/$release"
+assets="$repo/releases/download/$release"
+kernel="mx-proxy-node-linux-$arch"
 backup=$(mktemp -d /var/backups/mx-node-update.XXXXXXXX)
-
-for file in mx_node.py machine.py; do
+mkdir "$backup/new"
+for file in mx_node.py machine.py proxy-node; do
     cp -p "$app/$file" "$backup/$file"
-    curl -fsSL --retry 3 "$url/$file" -o "$backup/new-$file"
 done
-"$app/.venv/bin/python" -m py_compile "$backup/new-mx_node.py" "$backup/new-machine.py"
+(
+    cd "$backup/new"
+    for file in mx_node.py machine.py; do
+        curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 "$raw/$file" -o "$file"
+    done
+    for file in "$kernel" SHA256SUMS; do
+        curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 "$assets/$file" -o "$file"
+    done
+    awk -v name="$kernel" '$2 == name {print; found=1} END {if (!found) exit 1}' SHA256SUMS | sha256sum -c -
+    "$app/.venv/bin/python" -m py_compile mx_node.py machine.py
+)
 for file in mx_node.py machine.py; do
-    install -m 0644 "$backup/new-$file" "$app/$file"
+    install -m 0644 "$backup/new/$file" "$app/.$file.new"
+done
+install -m 0755 "$backup/new/$kernel" "$app/.proxy-node.new"
+for file in mx_node.py machine.py proxy-node; do
+    mv -f "$app/.$file.new" "$app/$file"
 done
 printf 'Backup: %s\n' "$backup"
-systemctl restart mx-websocket-node
+systemctl restart "$service"
 BASH
 ```
 
-用 `systemctl is-active mx-websocket-node`、启动日志和 `ss -ltnup` 核对服务和实际监听。若新版启动异常，把备份目录里的 `mx_node.py` 和 `machine.py` 恢复到 `/opt/mx-websocket-node/`，再重启服务。保留 `/var/lib/mx-websocket-node/`，其中有待上报记录。
+查看对应实例的 `systemctl status` 和启动日志，确认节点端口及面板「服务器管理」中的负载数据。若新版启动异常，将备份目录里的 `mx_node.py`、`machine.py` 和 `proxy-node` 恢复到该实例的程序目录，再重启对应服务。
 
 ## 协议与传输切换
 
@@ -128,6 +156,7 @@ sudo ss -ltnup
 ```
 
 - **配置与监听**：核对进程监听的端口是否与面板下发一致。在测试节点修改配置后，查看相应日志和实际监听，确认原版进程应用了变更。
+- **机器负载**：机器模式启动后约一秒采样并通过 HTTPS 上报，之后每 60 秒上报 CPU、内存、交换空间、状态目录所在磁盘及非回环网卡进出速率。网速单位为字节/秒。即使没有绑定节点或 WebSocket 断开，仍可在 Xboard「服务器管理」查看负载。若一直显示暂无数据，查看 `Machine load report` 日志，确认机器 Token 有效且面板已执行机器负载表相关迁移。
 - **计费**：有 WebSocket 时，日志应显示已连接并支持流量回执。仅使用 HTTPS 时，确认面板能访问 `/api/v2/server/report` 且没有持续的上报失败日志。用真实客户端选中测试节点访问目标并收到响应，再到面板确认账户流量入账。
 - **连接失败**：机器模式先查节点是否绑定且启用、面板是否接受机器 Token。能登录但没有回执，再查面板镜像、数据库迁移和 `/ws` 反代。面板 WebSocket 使用独立主机或端口时，可在 `bridge.ws_url` 显式填写受信任的 `wss://` 地址。
 - **配置文件**为 `/etc/mx-websocket-node/config.json`。证书字段见 [示例配置](config.example.json)。修改配置后执行 `sudo systemctl restart mx-websocket-node`。使用外部证书时，服务账号需能读取它。低端口可能需要额外的绑定权限。

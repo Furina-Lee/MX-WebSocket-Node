@@ -3,13 +3,82 @@ import copy
 import logging
 from pathlib import Path
 import re
+import shutil
+import time
 from urllib.parse import urlsplit
 
-from aiohttp import ClientSession, ClientTimeout, TraceConfig, WSMsgType
+from aiohttp import ClientError, ClientSession, ClientTimeout, TraceConfig, WSMsgType
 
 from mx_node import MAX_SNAPSHOT, reject_redirect, run, validated_url
 
 LOG = logging.getLogger("mx-node.machine")
+LOAD_REPORT_INTERVAL = 60
+
+
+def read_load_counters(proc=Path("/proc")):
+    fields = (proc / "stat").read_text(encoding="ascii").splitlines()[0].split()
+    if len(fields) < 5 or fields[0] != "cpu":
+        raise ValueError("missing aggregate CPU counters")
+    cpu = [int(field) for field in fields[1:9]]
+    idle = sum(cpu[3:5])
+
+    interfaces = {}
+    try:
+        lines = (proc / "net/dev").read_text(encoding="ascii").splitlines()[2:]
+    except OSError:
+        lines = []
+    for line in lines:
+        name, _, counters = line.rpartition(":")
+        fields = counters.split()
+        if name.strip() != "lo" and len(fields) >= 16:
+            interfaces[name.strip()] = (int(fields[0]), int(fields[8]))
+    return time.monotonic(), sum(cpu), idle, interfaces
+
+
+def build_load_report(previous, current, state, proc=Path("/proc")):
+    previous_time, previous_total, previous_idle, previous_interfaces = previous
+    current_time, current_total, current_idle, current_interfaces = current
+    total = current_total - previous_total
+    idle = current_idle - previous_idle
+    if total <= 0 or current_time <= previous_time:
+        raise ValueError("invalid machine load sampling interval")
+    cpu_used = 100 * max(0, min(total, total - idle)) / total
+
+    memory = {}
+    for line in (proc / "meminfo").read_text(encoding="ascii").splitlines():
+        key, value = line.split(":", 1)
+        memory[key] = int(value.split()[0]) * 1024
+
+    mem_total = memory["MemTotal"]
+    if "MemAvailable" in memory:
+        available = memory["MemAvailable"]
+    else:
+        available = sum(memory.get(key, 0) for key in ("MemFree", "Buffers", "Cached", "SReclaimable"))
+        available -= memory.get("Shmem", 0)
+    swap_total = memory.get("SwapTotal", 0)
+    report = {
+        "cpu": round(cpu_used, 2),
+        "mem": {"total": mem_total, "used": mem_total - max(0, min(mem_total, available))},
+        "swap": {"total": swap_total, "used": max(0, swap_total - memory.get("SwapFree", 0))},
+    }
+    try:
+        disk = shutil.disk_usage(state)
+    except OSError:
+        pass
+    else:
+        report["disk"] = {"total": disk.total, "used": disk.used}
+
+    received = sent = 0
+    shared_interfaces = current_interfaces.keys() & previous_interfaces.keys()
+    if shared_interfaces:
+        for name in shared_interfaces:
+            rx, tx = current_interfaces[name]
+            old_rx, old_tx = previous_interfaces[name]
+            received += max(0, rx - old_rx)
+            sent += max(0, tx - old_tx)
+        elapsed = current_time - previous_time
+        report["net"] = {"in_speed": received / elapsed, "out_speed": sent / elapsed}
+    return report
 
 
 class Machine:
@@ -195,8 +264,38 @@ class Machine:
             await asyncio.sleep(delay)
             delay = min(delay * 2, 60)
 
+    async def report_load(self):
+        previous = None
+        delay = 0
+        while True:
+            await asyncio.sleep(delay)
+            delay = LOAD_REPORT_INTERVAL
+            try:
+                current = read_load_counters()
+                if previous is None:
+                    previous = current
+                    delay = 1
+                    continue
+                baseline, previous = previous, current
+                payload = build_load_report(baseline, current, self.state)
+                async with self.session.post(
+                    self.base + "/api/v2/server/machine/status",
+                    json={**self.auth, **payload},
+                    allow_redirects=False,
+                ) as response:
+                    if response.status != 200:
+                        LOG.warning("Machine load report returned HTTP %s", response.status)
+                        continue
+                    result = await response.json()
+                    if not isinstance(result, dict) or result.get("data") is not True:
+                        raise ValueError("invalid machine load report response")
+                LOG.debug("Machine load report accepted")
+            except (ClientError, OSError, TimeoutError, ValueError, KeyError) as error:
+                LOG.warning("Machine load report failed (%s)", type(error).__name__)
+
     async def run(self):
         ws = asyncio.create_task(self.websocket())
+        load = asyncio.create_task(self.report_load())
         try:
             while True:
                 self.refresh.clear()
@@ -210,7 +309,8 @@ class Machine:
                     pass
         finally:
             ws.cancel()
-            await asyncio.gather(ws, return_exceptions=True)
+            load.cancel()
+            await asyncio.gather(ws, load, return_exceptions=True)
             await self.reconcile({})
 
 

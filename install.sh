@@ -215,14 +215,14 @@ fi
 if [[ -z $binary ]]; then
   command -v curl >/dev/null || fail '自动下载 MX 内核需要 curl，也可以用 --binary 指定本地文件。'
   # Pin the release and digest together so a changed asset cannot be installed.
-  kernel_release=v1.13-furina.7
+  kernel_release=mx-node-20261126
   case "$(uname -m)" in
     x86_64)
       kernel_arch=amd64
-      kernel_sha256=9ab99ea34acc9daf78b34ee79af9e6e305d73016af2af44b7c2687b1d29d54ec ;;
+      kernel_sha256=d1a2f4746b69ad948a253aa77301ed2e7e0b254d3058b67485bd687e3da19ee4 ;;
     aarch64)
       kernel_arch=arm64
-      kernel_sha256=9249be0a67ca80e508d4625aeb9fa0745a28de5fe545e8f5fd39f0b7ec2b8f0f ;;
+      kernel_sha256=93d5ed154dd2093faab7d3bae9b5fe8e5f7f8e3f9c9874c89af32e20b3a58561 ;;
     *) fail '自动下载 MX 内核只支持 Linux amd64 和 arm64。' ;;
   esac
   binary="$scratch/proxy-node"
