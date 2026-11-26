@@ -88,58 +88,16 @@ sudo systemctl start xboard-node
 
 ## 更新已安装的新版节点
 
-适用于已安装的 Linux 节点。命令会备份当前适配器和内核，在校验后更新两者，保留原配置、机器凭据和状态目录。使用命名实例时，将 `instance=` 改成实际实例名称。重启会短暂断开该实例的连接。
+在已安装 MX-WebSocket-Node 的 Linux 节点机运行。脚本会自动选择最新的正式发行版，按系统架构下载内核，核验 SHA-256，备份现有程序，再重启指定实例。如果依赖清单有变化，脚本会先准备新版 Python 环境。启动检查失败时会尝试恢复备份。现有配置、机器凭据和状态目录会保留。
 
 ```bash
-sudo bash <<'BASH'
-set -euo pipefail
-umask 077
-instance=
-app=/opt/mx-websocket-node
-service=mx-websocket-node.service
-if [[ -n $instance ]]; then
-    app="$app/$instance"
-    service="mx-websocket-node@$instance.service"
-fi
-case "$(uname -m)" in
-    x86_64) arch=amd64 ;;
-    aarch64) arch=arm64 ;;
-    *) echo '仅支持 Linux amd64 和 arm64' >&2; exit 1 ;;
-esac
-release=mx-node-20261126
-repo=https://github.com/Furina-Lee/MX-WebSocket-Node
-raw="https://raw.githubusercontent.com/Furina-Lee/MX-WebSocket-Node/$release"
-assets="$repo/releases/download/$release"
-kernel="mx-proxy-node-linux-$arch"
-backup=$(mktemp -d /var/backups/mx-node-update.XXXXXXXX)
-mkdir "$backup/new"
-for file in mx_node.py machine.py proxy-node; do
-    cp -p "$app/$file" "$backup/$file"
-done
-(
-    cd "$backup/new"
-    for file in mx_node.py machine.py; do
-        curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 "$raw/$file" -o "$file"
-    done
-    for file in "$kernel" SHA256SUMS; do
-        curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 "$assets/$file" -o "$file"
-    done
-    awk -v name="$kernel" '$2 == name {print; found=1} END {if (!found) exit 1}' SHA256SUMS | sha256sum -c -
-    "$app/.venv/bin/python" -m py_compile mx_node.py machine.py
-)
-for file in mx_node.py machine.py; do
-    install -m 0644 "$backup/new/$file" "$app/.$file.new"
-done
-install -m 0755 "$backup/new/$kernel" "$app/.proxy-node.new"
-for file in mx_node.py machine.py proxy-node; do
-    mv -f "$app/.$file.new" "$app/$file"
-done
-printf 'Backup: %s\n' "$backup"
-systemctl restart "$service"
-BASH
+upgrade=$(curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/Furina-Lee/MX-WebSocket-Node/dev/upgrade.sh) &&
+sudo bash -c "$upgrade" --
 ```
 
-查看对应实例的 `systemctl status` 和启动日志，确认节点端口及面板「服务器管理」中的负载数据。若新版启动异常，将备份目录里的 `mx_node.py`、`machine.py` 和 `proxy-node` 恢复到该实例的程序目录，再重启对应服务。
+命名实例在最后一行追加 `--instance airport-a`。需要固定版本时追加 `--version mx-node-20261126`，也可同时使用两个参数。升级会短暂断开该实例的连接。
+
+自动更新识别形如 `mx-node-YYYYMMDD` 或 `mx-node-YYYYMMDD.1` 的正式 GitHub Release。每个发行版需包含适配器源码、`requirements.txt`、两个 Linux 内核与 `SHA256SUMS`。升级后可在 Xboard「服务器管理」查看负载，并用 `journalctl -u mx-websocket-node.service -n 50` 查看日志。命名实例请使用完整的 systemd 服务名。
 
 ## 协议与传输切换
 
